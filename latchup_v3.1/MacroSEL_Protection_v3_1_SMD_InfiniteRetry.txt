@@ -1,0 +1,1286 @@
+================================================================================
+MACRO-SEL PROTECTION SYSTEM - SMD VERSION 3.1 - INFINITE RETRY
+SINGLE MASTER SWITCH WITH INFINITE 1-SECOND RETRY
+================================================================================
+
+Document Version: 3.1 (SMD WITH INFINITE RETRY)
+Date: February 2026
+Application: ARM Cortex-A72 Edge Computer - LEO Orbit
+Design: Single master switch, 6 current sensors, infinite retry with 1s delay
+
+CHANGES FROM v3.0:
+- REMOVED: Retry counter (CD4017) - no longer limiting retries
+- REMOVED: Permanent latch (CD4013) - system never gives up
+- CHANGED: Retry delay from 100ms to 1 second (reduced component stress)
+- SIMPLIFIED: Enable logic from 3-input to 2-input AND gate
+- REDUCED: PCB size from 80×60mm to 75×55mm (~15% smaller)
+- SAVED: $42 in component costs
+
+DESIGN PHILOSOPHY:
+- System keeps trying to recover forever (infinite retries)
+- 1 second retry delay reduces stress on PMIC and buck converters
+- OBC (On-Board Computer) monitors device health
+- OBC cuts power if device remains unresponsive
+- Simpler circuit, fewer failure modes
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+1. SYSTEM ARCHITECTURE OVERVIEW
+2. SMD COMPONENT LIST (SIMPLIFIED)
+3. MASTER PROTECTION CIRCUIT (SMD Version)
+4. CURRENT SENSE CIRCUITS (×6, SMD Version)
+5. GLOBAL LOGIC CONTROLLER (SIMPLIFIED - No Counter/Latch)
+6. COMPLETE SYSTEM INTEGRATION
+7. SIMPLIFIED SMD BILL OF MATERIALS
+8. SMD PCB LAYOUT GUIDELINES (75×55mm)
+9. SMD ASSEMBLY NOTES
+10. TESTING PROCEDURES
+11. FAILURE MODE ANALYSIS
+
+================================================================================
+1. SYSTEM ARCHITECTURE OVERVIEW
+================================================================================
+
+PROTECTION STRATEGY:
+- 1 master P-channel MOSFET switch (high-side, 5V input)
+- 6 independent current sensors (one per rail, for diagnostics)
+- Any fault → all rails shut down together
+- Hardware-only auto-retry: INFINITE attempts, 1 second between attempts
+- 300ms startup delay from PMIC_PGOOD
+- RC snubber gate driver for clean, reliable switching
+- OBC monitors device and cuts power if stuck in retry loop
+
+SYSTEM BLOCK DIAGRAM:
+
+    5V INPUT (spacecraft bus)
+         │
+         ↓
+    ┌────────────────────────────────┐
+    │  MASTER PROTECTION SWITCH      │
+    │                                │
+    │  P-FET: IRHLUC7970Z4 (D2PAK)  │
+    │  Gate Driver: CD4049M Inverter │
+    │  RC Snubber: 100Ω + 100nF     │
+    │                                │
+    │  Control: ENABLE_GLOBAL        │
+    └────────┬───────────────────────┘
+             │ 5V Protected Output
+             │
+    ┌────────┴────────────────────────┐
+    │                                 │
+    ↓                                 ↓
+Buck #1 (3.3V 10A)              Buck #2 + PMIC
+    │                                 │
+    ├→ Rail 1: 3.3V 5A (AI)          ├→ Rail 3: 1.2V 3A
+    └→ Rail 2: 3.3V 5A (AI)          ├→ Rail 4: 1.35V 400mA
+                                     ├→ Rail 5: 1.8V 2A
+                                     └→ Rail 6: 2.5V 1A
+         │    │    │    │    │    │
+         ↓    ↓    ↓    ↓    ↓    ↓
+    ┌────────────────────────────────┐
+    │  6 CURRENT SENSE CIRCUITS      │
+    │  (Detect overcurrent)          │
+    │                                │
+    │  FAULT_1 ┐                    │
+    │  FAULT_2 │                    │
+    │  FAULT_3 ├→ 6-input OR gate   │
+    │  FAULT_4 │   → GLOBAL_FAULT   │
+    │  FAULT_5 │                    │
+    │  FAULT_6 ┘                    │
+    └────────────┬───────────────────┘
+                 │
+    ┌────────────▼───────────────────┐
+    │  SIMPLIFIED LOGIC CONTROLLER   │
+    │                                │
+    │  • Startup delay (300ms)       │
+    │  • Retry timer (1 second)      │
+    │  • NO COUNTER - infinite retry │
+    │  • NO LATCH - never gives up   │
+    │                                │
+    │  → ENABLE_GLOBAL ──────────────┼──→ To gate driver
+    └────────────────────────────────┘
+
+PERFORMANCE:
+Response Time: 10-18µs (well within 100µs macro-SEL requirement)
+Retry Delay: 1.0 second (reduced component stress)
+Retry Limit: INFINITE (OBC monitors and cuts power if needed)
+PCB AREA: ~4,125 mm² (75mm × 55mm) - 15% SMALLER than v3.0
+Cost: ~$806 (vs $850 in v3.0) - $42 savings
+
+OPERATIONAL CONCEPT:
+1. Latchup detected → System shuts down in <20µs
+2. System stays off for 1 second
+3. System attempts restart
+4. If latchup cleared → Normal operation resumes
+5. If latchup persists → Repeats steps 2-3 indefinitely
+6. OBC monitors device responsiveness
+7. OBC cuts power if device stuck in retry loop
+
+================================================================================
+2. SMD COMPONENT LIST (SIMPLIFIED)
+================================================================================
+
+COMPONENTS REMOVED FROM v3.0:
+- CD4017BM/883B (decade counter) - no longer needed
+- CD4013BM/883B (D flip-flop) - no longer needed
+- Power-on reset components (10kΩ + 10µF) - no longer needed
+- 1× AND gate from CD4081 (now need only 2-input, not 3-input)
+
+COMPONENTS CHANGED FROM v3.0:
+- R12: 1MΩ → 10MΩ (for 1 second timer delay)
+
+ALL OTHER COMPONENTS UNCHANGED (same as v3.0)
+
+COMPLETE COMPONENT LIST:
+┌───────────────────────┬────────────────────────┬─────────────────┐
+│ Function              │ SMD Part Number        │ Package Type    │
+├───────────────────────┼────────────────────────┼─────────────────┤
+│ Master P-FET          │ IRHLUC7970Z4 (D2PAK)  │ D2PAK (TO-263)  │
+│ Master inverter       │ CD4049UM/883B         │ SOIC-16         │
+│ Op-amps (×6)          │ OP07CSZ/883B          │ SOIC-8          │
+│ Comparators (×2)      │ LM139AMWC/883C        │ SOIC-14 (wide)  │
+│ OR gates (×2)         │ CD4072BM/883B         │ SOIC-14         │
+│ Schmitt trigger       │ CD4093BM/883B         │ SOIC-14         │
+│ Timer (555)           │ LM555CM/883C          │ SOIC-8          │
+│ AND gate (1 only)     │ CD4081BM/883B         │ SOIC-14         │
+│ Inverter (logic)      │ CD4049UM/883B         │ SOIC-16         │
+│ Current sense (×6)    │ WSL2512 (various R)   │ 2512            │
+│ Resistors             │ 1206 chip resistors   │ 1206            │
+│ Capacitors            │ 1206 ceramics         │ 1206            │
+│ Bulk caps             │ 7343 tantalum         │ 7343 (D-case)   │
+└───────────────────────┴────────────────────────┴─────────────────┘
+
+ALL ICs have /883B or /883C suffix = 100 krad TID radiation rating ✓
+
+TOTAL IC COUNT:
+- v3.0: 17 ICs (6 op-amps + 2 comparators + 9 logic ICs)
+- v3.1: 15 ICs (6 op-amps + 2 comparators + 7 logic ICs)
+- REDUCTION: 2 fewer ICs
+
+================================================================================
+3. MASTER PROTECTION CIRCUIT - SMD VERSION
+================================================================================
+
+(UNCHANGED FROM v3.0 - same circuit, same connections)
+
+PURPOSE: This circuit switches the entire 5V power supply on/off.
+         Any latchup on any rail → this cuts power to everything.
+
+SMD COMPONENTS:
+---------------
+Q1:    IRHLUC7970Z4 (D2PAK) - P-channel MOSFET, rad-hard, 30mΩ
+U1:    CD4049UM/883B (SOIC-16) - Hex inverter
+R1:    10kΩ, 1206 SMD resistor - Pull-up
+R2:    100Ω, 1206 SMD resistor - Gate drive
+C1:    100µF, 7343 tantalum - Output bulk
+C2:    100nF, 1206 ceramic C0G - Gate snubber
+C3:    0.1µF, 1206 ceramic X7R - Inverter decoupling
+
+CIRCUIT DIAGRAM:
+
+                         +5V INPUT (SOURCE)
+                               │
+                               │
+                          [R1: 10kΩ]  ← Pull-up resistor
+                               │         (ensures FET OFF at startup)
+                               │
+                               ├─────────────────→ GATE pad (Q1)
+                               │                       │
+                               │                       │
+                          [R2: 100Ω]           [C2: 100nF] ← RC Snubber
+                               │                       │
+                               │                       │
+                         ┌─────▼───────┐               │
+    ENABLE_GLOBAL ───────┤  CD4049UM   │               │
+    (from logic)         │  Inverter   │               │
+                         │  U1 pin 1   │               │
+                         └─────────────┘               │
+                               │                       │
+                         U1 pin 2 (OUT)            +5V INPUT
+                              (INV_OUT)             (SOURCE)
+
+DETAILED CONNECTIONS:
+
+**Q1 (IRHLUC7970Z4 D2PAK MOSFET):**
+- Pin/Pad 1 (GATE): Connect to GATE_NODE
+- Pin/Pad 2 (SOURCE): Connect to 5V INPUT (wide 4mm trace)
+- Tab (DRAIN): Connect to 5V OUTPUT via thermal vias (10-20 vias, 0.3mm)
+
+**U1 (CD4049UM/883B SOIC-16 Inverter):**
+- Pin 1 (IN1): Connect to ENABLE_GLOBAL signal (from Section 5)
+- Pin 2 (OUT1): Connect to INV_OUT node (connects to R2)
+- Pins 7 AND 16 (both VCC): Connect to +5V OUTPUT
+- Pin 8 (GND): Via to ground plane
+- Pin 3,5,9,11,13,15 (unused inputs): Tie to GND via 10kΩ or leave floating
+- Pin 4,6,10,12,14 (unused outputs): Leave unconnected
+
+**R1 (10kΩ, 1206 SMD):**
+- Pad 1: Connect to SOURCE (5V INPUT)
+- Pad 2: Connect to GATE_NODE
+
+**R2 (100Ω, 1206 SMD):**
+- Pad 1: Connect to INV_OUT (U1 pin 2)
+- Pad 2: Connect to GATE_NODE
+
+**C2 (100nF, 1206 SMD ceramic C0G):**
+- Pad 1: Connect to GATE_NODE
+- Pad 2: Connect to SOURCE (5V INPUT)
+
+**C1 (100µF, 7343 tantalum, POLARITY!):**
+- Positive pad: Connect to 5V OUTPUT (Q1 DRAIN)
+- Negative pad (marked): Multiple vias to ground plane
+
+**C3 (0.1µF, 1206 SMD ceramic X7R):**
+- Pad 1: Connect to U1 pin 16 (VCC)
+- Pad 2: Connect to U1 pin 8 (GND)
+- Place <2mm from U1 package
+
+OPERATION (unchanged):
+- ENABLE_GLOBAL = HIGH → U1 OUT = LOW → Gate = 0V → VGS = -5V → FET ON
+- ENABLE_GLOBAL = LOW → U1 OUT = HIGH → Gate = 5V → VGS = 0V → FET OFF
+
+RESPONSE TIME: ~10µs (gate RC time constant)
+
+(For complete assembly details, see v3.0 Section 3)
+
+================================================================================
+4. CURRENT SENSE CIRCUITS (×6) - SMD VERSION
+================================================================================
+
+(UNCHANGED FROM v3.0 - same circuits, same connections)
+
+PURPOSE: Each rail has current sensor to detect overcurrent/latchup.
+         Six sensors feed into OR gate.
+         Any sensor trips → master switch turns OFF entire system.
+
+BUILD 6 IDENTICAL SMD COPIES (one per rail with different R_SENSE values)
+
+SMD COMPONENTS PER RAIL:
+------------------------
+R_SENSE:  WSL2512 (4-terminal Kelvin, 2512 SMD)
+U_AMP:    OP07CSZ/883B (SOIC-8, precision op-amp)
+U_COMP:   LM139AMWC/883C (SOIC-14 wide, quad comparator)
+R4-R10:   1206 SMD chip resistors
+C2-C4:    1206 SMD ceramic capacitors
+
+SENSE RESISTOR VALUES (unchanged):
+┌──────────┬───────────┬────────────┬───────────┬──────────────────┐
+│   Rail   │  Voltage  │   Normal   │   Trip    │   R_SENSE Value  │
+│   Name   │           │   Current  │  Current  │   WSL2512 P/N    │
+├──────────┼───────────┼────────────┼───────────┼──────────────────┤
+│ Rail 1   │  3.3V     │   5.0A     │   5.8A    │  WSL2512R0100FEA │
+│ Rail 2   │  3.3V     │   5.0A     │   5.8A    │  WSL2512R0100FEA │
+│ Rail 3   │  1.2V     │   3.0A     │   3.5A    │  WSL2512R0200FEA │
+│ Rail 4   │  1.35V    │   0.4A     │   0.5A    │  WSL2512R1000FEA │
+│ Rail 5   │  1.8V     │   2.0A     │   2.3A    │  WSL2512R0300FEA │
+│ Rail 6   │  2.5V     │   1.0A     │   1.2A    │  WSL2512R0500FEA │
+└──────────┴───────────┴────────────┴───────────┴──────────────────┘
+
+CIRCUIT TOPOLOGY (example for Rail 3: 1.2V @ 3A):
+
+PMIC 1.2V ──→ [WSL2512 R_SENSE] ──→ CPU/RAM Load
+                Force+/Force-
+                     │
+                Sense+/Sense-
+                     ↓
+               [OP07CSZ Op-Amp]
+                  Gain = 20×
+                     ↓
+             [LM139AMWC Comparator]
+                Compare to V_REF
+                     ↓
+                  FAULT_3
+            (HIGH = OK, LOW = fault)
+
+DETAILED CONNECTIONS FOR ONE RAIL (Rail 3 example):
+
+**R_SENSE (WSL2512R0200FEA, 20mΩ, 2512 SMD):**
+- Force+ pad: Rail input from PMIC (2mm wide trace)
+- Force- pad: Rail output to load (2mm wide trace)
+- Sense+ pad: To OP07 pin 3 (0.25mm differential trace)
+- Sense- pad: To OP07 pin 2 (0.25mm differential trace, matched length)
+
+**U_AMP (OP07CSZ/883B SOIC-8):**
+- Pin 1 (NULL1): Leave unconnected
+- Pin 2 (IN-): Connect to Sense- from R_SENSE
+- Pin 3 (IN+): Connect to Sense+ from R_SENSE
+- Pin 4 (GND): Via to ground plane
+- Pin 5 (NULL2): Leave unconnected
+- Pin 6 (OUT): To V_AMP_3 node (to comparator pin 3)
+- Pin 7 (VCC): To +5V
+- Pin 8 (NC): No connection
+
+**R4 (10kΩ, 1206 SMD):**
+- Pad 1: OP07 pin 3 (IN+)
+- Pad 2: GND
+
+**R5 (10kΩ, 1206 SMD):**
+- Pad 1: OP07 pin 2 (IN-)
+- Pad 2: GND
+
+**R6 (200kΩ, 1206 SMD, feedback resistor):**
+- Pad 1: OP07 pin 2 (IN-)
+- Pad 2: OP07 pin 6 (OUT)
+
+**C2 (0.1µF, 1206 SMD, input filter):**
+- Pad 1: OP07 pin 3 (IN+)
+- Pad 2: GND
+
+**C3 (0.1µF, 1206 SMD, bypass):**
+- Pad 1: OP07 pin 7 (VCC)
+- Pad 2: OP07 pin 4 (GND)
+
+**U_COMP (LM139AMWC/883C SOIC-14 wide, use comparator #1):**
+- Pin 1 (OUT1): To FAULT_3 signal (and to R10 pull-up)
+- Pin 2 (IN1-): To V_REF_3 node (reference voltage)
+- Pin 3 (IN1+): To V_AMP_3 node (from op-amp out)
+- Pin 4 (GND): Via to ground plane
+- Pin 11 (VCC): To +5V
+- Other pins: Used for other rails or left unconnected
+
+**V_REF divider for Rail 3 (1.35V reference):**
+
+R7 (270kΩ, 1206 SMD):
+- Pad 1: +5V
+- Pad 2: V_REF_3 node
+
+R8 (100kΩ, 1206 SMD):
+- Pad 1: V_REF_3 node
+- Pad 2: GND
+
+Filter cap (0.1µF, 1206 SMD):
+- Pad 1: V_REF_3 node
+- Pad 2: GND
+
+Calculation: V_REF = 5V × (100k/(270k+100k)) = 1.35V ✓
+
+**R9 (10kΩ, 1206 SMD, hysteresis resistor):**
+- Pad 1: LM139 pin 1 (OUT1)
+- Pad 2: LM139 pin 3 (IN1+)
+
+**R10 (10kΩ, 1206 SMD, pull-up):**
+- Pad 1: LM139 pin 1 (OUT1)
+- Pad 2: +5V
+
+**C4 (0.1µF, 1206 SMD, bypass):**
+- Pad 1: LM139 pin 11 (VCC)
+- Pad 2: LM139 pin 4 (GND)
+
+REPEAT 6 TIMES (one for each rail with appropriate R_SENSE and V_REF values)
+
+COMPONENT VALUES FOR ALL RAILS:
+┌──────┬──────────────┬────────┬──────────┬──────────────────────┐
+│ Rail │ R_SENSE (WSL)│ V_AMP  │  V_REF   │  R7 / R8 (1206 SMD)  │
+│      │              │  trip  │  target  │  (5V divider)        │
+├──────┼──────────────┼────────┼──────────┼──────────────────────┤
+│  1   │ R0100FEA 10mΩ│ 1.16V  │  1.10V   │ 180kΩ / 47kΩ         │
+│  2   │ R0100FEA 10mΩ│ 1.16V  │  1.10V   │ 180kΩ / 47kΩ         │
+│  3   │ R0200FEA 20mΩ│ 1.40V  │  1.35V   │ 270kΩ / 100kΩ        │
+│  4   │ R1000FEA 100mΩ│ 1.00V │  0.95V   │ 220kΩ / 47kΩ         │
+│  5   │ R0300FEA 30mΩ│ 1.38V  │  1.33V   │ 270kΩ / 100kΩ        │
+│  6   │ R0500FEA 50mΩ│ 1.20V  │  1.15V   │ 220kΩ / 56kΩ         │
+└──────┴──────────────┴────────┴──────────┴──────────────────────┘
+
+(For complete assembly details, see v3.0 Section 4)
+
+================================================================================
+5. GLOBAL LOGIC CONTROLLER - SIMPLIFIED (NO COUNTER/LATCH)
+================================================================================
+
+PURPOSE: Combines 6 fault signals, implements infinite retry with 1s delay
+
+SIMPLIFIED ARCHITECTURE:
+- No retry counter (infinite attempts)
+- No permanent latch (never gives up)
+- Simpler enable logic (2-input AND instead of 3-input)
+
+SMD COMPONENTS (REDUCED FROM v3.0):
+-----------------------------------
+U2:   2× CD4072BM/883B (SOIC-14, dual 4-input OR gate) - fault aggregation
+U3:   CD4093BM/883B (SOIC-14, quad NAND Schmitt trigger) - startup delay
+U4:   LM555CM/883C (SOIC-8, timer) - 1 second retry delay
+U7:   CD4081BM/883B (SOIC-14, quad AND gate) - enable logic (only need 1 gate now)
+U8:   CD4049UM/883B (SOIC-16, hex inverter) - logic inversion
+
+REMOVED COMPONENTS:
+U5:   CD4017BM (decade counter) - NO LONGER NEEDED
+U6:   CD4013BM (D flip-flop) - NO LONGER NEEDED
+
+All resistors: 1206 SMD chip resistors
+All capacitors: 1206 SMD ceramics
+
+
+SECTION A: STARTUP DELAY (300ms) - UNCHANGED FROM v3.0
+------------------------------------------------------
+
+Prevents false trips during power-up inrush.
+
+SMD Components:
+- R11: 1MΩ, 1206 SMD
+- C5: 330nF, 1206 SMD ceramic
+- U3: CD4093BM/883B (SOIC-14, Schmitt trigger)
+
+Circuit:
+
+    PMIC_PGOOD ────┬─────[R11: 1MΩ]─────┬──→ Schmitt IN
+                   │                     │
+                   │                  [C5: 330nF]
+                   │                     │
+                   └─────────────────────┴──→ GND
+
+Time constant: τ = 1MΩ × 330nF = 330ms
+
+Connections:
+
+**R11 (1MΩ, 1206 SMD):**
+- Pad 1: PMIC_PGOOD signal (from PF8100 PMIC)
+- Pad 2: DELAY_NODE
+
+**C5 (330nF, 1206 SMD):**
+- Pad 1: DELAY_NODE (same as R11 pad 2)
+- Pad 2: GND via
+
+**U3 (CD4093BM/883B SOIC-14 Schmitt trigger):**
+
+CD4093 pinout (SOIC-14):
+     ┌─────┴─────┐
+IN1A │1       14│ VCC
+IN1B │2       13│ IN4B
+OUT1 │3       12│ IN4A
+OUT2 │4       11│ OUT4
+IN2A │5       10│ OUT3
+IN2B │6        9│ IN3B
+ GND │7        8│ IN3A
+     └───────────┘
+
+Use gate #1 (pins 1, 2, 3):
+- Pin 1 (IN1A): Connect to DELAY_NODE
+- Pin 2 (IN1B): Connect to VCC (+5V) - makes this a buffer
+- Pin 3 (OUT1): This is **PGOOD_DELAYED** signal
+- Pin 14 (VCC): +5V
+- Pin 7 (GND): Via to ground plane
+- 0.1µF (1206) cap from pin 14 to pin 7, <2mm from IC
+
+Operation:
+- PMIC powers up → PGOOD goes HIGH
+- C5 charges through R11 slowly
+- After 330ms, voltage crosses Schmitt threshold (~2.5V)
+- OUT1 (pin 3) goes HIGH = PGOOD_DELAYED
+- System can now enable
+
+
+SECTION B: FAULT AGGREGATION (6-input OR) - UNCHANGED FROM v3.0
+---------------------------------------------------------------
+
+Combines 6 FAULT signals into one GLOBAL_FAULT.
+
+SMD Components:
+- U2: Two CD4072BM/883B ICs (SOIC-14, dual 4-input OR gates)
+
+CD4072 pinout (SOIC-14):
+     ┌─────┴─────┐
+ IN1A│1       14│ VCC
+ IN2A│2       13│ IN1B
+ IN3A│3       12│ IN2B
+ IN4A│4       11│ IN3B
+OUTA │5       10│ IN4B
+OUTB │6        9│ OUTB
+ GND │7        8│ NC
+     └───────────┘
+
+**IC #1 (First CD4072BM):**
+- Pin 14: +5V
+- Pin 7: GND via
+- 0.1µF (1206) bypass cap
+
+OR gate A (handle FAULT_1 through FAULT_4):
+- Pin 1: FAULT_1 signal (from comparator #1)
+- Pin 2: FAULT_2 signal (from comparator #2)
+- Pin 3: FAULT_3 signal (from comparator #3)
+- Pin 4: FAULT_4 signal (from comparator #4)
+- Pin 5: Output = OR_AB (intermediate signal)
+
+OR gate B (combine OR_AB with OR_CD):
+- Pin 12: OR_AB (from pin 5 same IC)
+- Pin 11: OR_CD (from second IC pin 5)
+- Pin 13: Tie to GND (unused input)
+- Pin 10: Tie to GND (unused input)
+- Pin 6: Output = **GLOBAL_FAULT** signal
+
+**IC #2 (Second CD4072BM):**
+- Pin 14: +5V
+- Pin 7: GND via
+- 0.1µF (1206) bypass cap
+
+OR gate A (handle FAULT_5 and FAULT_6):
+- Pin 1: FAULT_5 signal (from comparator #5)
+- Pin 2: FAULT_6 signal (from comparator #6)
+- Pin 3: Tie to GND (unused)
+- Pin 4: Tie to GND (unused)
+- Pin 5: Output = OR_CD
+
+Logic:
+- All FAULT_n = HIGH → OR_AB = HIGH, OR_CD = HIGH → GLOBAL_FAULT = HIGH ✓
+- Any FAULT_n = LOW → GLOBAL_FAULT = LOW (fault detected)
+
+
+SECTION C: RETRY TIMER (1 SECOND DELAY) - MODIFIED FROM v3.0
+-------------------------------------------------------------
+
+When fault detected, generate 1 second pulse (system shutdown period).
+
+**CHANGED:** Timer delay increased from 100ms to 1 second
+
+SMD Components:
+- U4: LM555CM/883C (SOIC-8, timer)
+- R12: **10MΩ, 1206 SMD** (CHANGED from 1MΩ in v3.0)
+- C6: 100nF, 1206 SMD
+- C7: 0.1µF, 1206 SMD (decoupling)
+
+LM555 pinout (SOIC-8):
+     ┌─────┴─────┐
+  GND│1        8│ VCC
+ TRIG│2        7│ DISCH
+  OUT│3        6│ THRESH
+RESET│4        5│ CTRL
+     └───────────┘
+
+Configuration: Monostable (one-shot) mode
+
+Connections:
+
+**U4 Power:**
+- Pin 8 (VCC): +5V
+- Pin 1 (GND): Via to ground plane
+- C7 (0.1µF, 1206): Between pins 8 and 1, <2mm from IC
+
+**Timing network:**
+- Pin 7 (DISCH) connect to pin 6 (THRESH) → TIMING_NODE
+
+**R12 (10MΩ, 1206 SMD) - CRITICAL CHANGE:**
+- Pad 1: VCC (+5V)
+- Pad 2: TIMING_NODE (pins 6 and 7)
+
+**C6 (100nF, 1206 SMD):**
+- Pad 1: TIMING_NODE
+- Pad 2: GND via
+
+Time delay calculation:
+t = 1.1 × R × C = 1.1 × 10MΩ × 100nF = 1.1 seconds ≈ **1.0 second** ✓
+
+NOTE: 10MΩ is a high value. If not available in 1206:
+- Alternative 1: Use 2× 5.1MΩ in series (1206 each)
+- Alternative 2: Use 1MΩ + 1µF capacitor (t = 1.1 × 1MΩ × 1µF = 1.1s)
+- Alternative 3: Use 2010 size for 10MΩ resistor (larger package)
+
+**Trigger input:**
+- Pin 2 (TRIG): Connect GLOBAL_FAULT directly
+- When GLOBAL_FAULT goes LOW → timer triggers
+
+**Control:**
+- Pin 5 (CTRL): Optional 10nF cap to GND (noise filtering)
+
+**Reset:**
+- Pin 4 (RESET): Tie to VCC (always enabled)
+- Or connect to PGOOD_DELAYED (disable timer during startup)
+
+**Output:**
+- Pin 3 (OUT): This is **RETRY_PULSE** signal
+- HIGH for ~1.0 second when triggered
+- LOW otherwise
+
+Operation:
+- GLOBAL_FAULT goes LOW (any rail faulted)
+- Timer triggers → OUT (pin 3) goes HIGH for 1 second
+- During this time, system shut down (ENABLE_GLOBAL = LOW)
+- After 1 second, OUT returns LOW → system attempts restart
+- If fault persists → cycle repeats indefinitely
+
+
+SECTION D: REMOVED - Counter and Latch
+--------------------------------------
+
+**THESE SECTIONS NO LONGER EXIST IN v3.1:**
+- Counter (was CD4017, counted retry attempts)
+- Permanent latch (was CD4013, disabled after 5 retries)
+- Power-on reset circuit (was 10kΩ + 10µF, reset counter/latch)
+
+System now retries forever - OBC monitors and cuts power if needed.
+
+
+SECTION E: SIMPLIFIED ENABLE GENERATION (2-INPUT AND)
+-----------------------------------------------------
+
+**SIMPLIFIED:** Enable logic now only 2 inputs (was 3 inputs in v3.0)
+
+Final logic: **ENABLE_GLOBAL = PGOOD_DELAYED AND (NOT RETRY_PULSE)**
+
+Where:
+- PGOOD_DELAYED: From Section A (startup delay complete)
+- RETRY_PULSE: From Section C (retry in progress)
+- NO MORE LATCH_OFF (removed in v3.1)
+
+SMD Components:
+- U7: CD4081BM/883B (SOIC-14, quad AND gate) - only need 1 gate
+- U8: CD4049UM/883B (SOIC-16, hex inverter) - only need 1 gate
+
+**1. Invert RETRY_PULSE:**
+
+Using U8 (CD4049UM SOIC-16 inverter):
+
+CD4049 pinout (SOIC-16):
+     ┌─────┴─────┐
+  IN1│1       16│ VCC
+ OUT1│2       15│ IN6
+  IN2│3       14│ OUT6
+ OUT2│4       13│ IN5
+  IN3│5       12│ OUT5
+ OUT3│6       11│ IN4
+  VCC│7       10│ OUT4
+  GND│8        9│ IN4
+     └───────────┘
+
+NOTE: CD4049 has TWO VCC pins (7 and 16) and TWO GND pins (8)
+
+Use gate #1 (pins 1 and 2):
+- Pin 1 (IN1): Connect to RETRY_PULSE signal
+- Pin 2 (OUT1): Output is **NOT_RETRY** signal
+- Pins 7 AND 16 (both VCC): Connect to +5V
+- Pin 8 (GND): Via to ground plane
+- 0.1µF (1206) bypass cap between pin 16 and pin 8
+- Unused inputs (pins 3,5,9,11,13,15): Tie to GND or leave floating
+- Unused outputs: Leave unconnected
+
+**2. Build 2-input AND:**
+
+Using U7 (CD4081BM SOIC-14 AND gate):
+
+CD4081 pinout (SOIC-14):
+     ┌─────┴─────┐
+ IN1A│1       14│ VCC
+ IN1B│2       13│ IN4A
+OUT1 │3       12│ IN4B
+OUT2 │4       11│ OUT4
+ IN2A│5       10│ OUT3
+ IN2B│6        9│ IN3B
+  GND│7        8│ IN3A
+     └───────────┘
+
+Use gate #1 (pins 1, 2, 3):
+- Pin 1 (IN1A): Connect to PGOOD_DELAYED signal
+- Pin 2 (IN1B): Connect to NOT_RETRY signal
+- Pin 3 (OUT1): Output is **ENABLE_GLOBAL**
+- Pin 14 (VCC): +5V
+- Pin 7 (GND): Via to ground plane
+- 0.1µF (1206) bypass cap from pin 14 to pin 7
+
+**3. Connect ENABLE_GLOBAL to master switch:**
+- ENABLE_GLOBAL signal goes to Section 3 (master switch)
+- Connects to U1 (master inverter) pin 1 input
+
+Logic table (SIMPLIFIED from v3.0):
+
+| PGOOD_DELAYED | RETRY_PULSE | NOT_RETRY | ENABLE_GLOBAL | System State      |
+|---------------|-------------|-----------|---------------|-------------------|
+| LOW (startup) | X           | X         | LOW           | OFF (waiting)     |
+| HIGH          | HIGH        | LOW       | LOW           | OFF (retrying)    |
+| HIGH          | LOW         | HIGH      | **HIGH**      | **ON (running)**  |
+
+Note: No more LATCH_OFF condition - system never permanently disables!
+
+
+POWER DISTRIBUTION FOR LOGIC ICs:
+---------------------------------
+
+All logic ICs powered from +5V OUTPUT (protected 5V, after master switch).
+
+Why? If master switch turns OFF, logic loses power:
+- Prevents gate drive during shutdown
+- Clean power-up on retry
+- No contention or floating signals
+
+Each SOIC IC requires:
+- VCC pin(s): 0.5mm trace to +5V OUTPUT
+- GND pin(s): Via directly to ground plane
+- 0.1µF (1206) bypass cap <2mm from IC
+
+
+COMPLETE SIGNAL FLOW (v3.1 SIMPLIFIED):
+---------------------------------------
+
+STARTUP:
+1. PMIC powers up → PMIC_PGOOD = HIGH
+2. RC delay (R11/C5) charges for 330ms
+3. Schmitt trigger (U3) outputs PGOOD_DELAYED = HIGH
+4. If no faults: RETRY_PULSE = LOW
+5. Inverter (U8): NOT_RETRY = HIGH
+6. AND gate (U7): PGOOD_DELAYED AND NOT_RETRY = HIGH
+7. ENABLE_GLOBAL = HIGH
+8. Master inverter (U1): ENABLE_GLOBAL → Gate LOW → FET ON
+9. System runs
+
+FAULT DETECTION & RETRY:
+1. Latchup on any rail → FAULT_n = LOW
+2. OR gates (U2) → GLOBAL_FAULT = LOW
+3. Timer (U4) triggers → RETRY_PULSE = HIGH (1 second)
+4. Inverter (U8): NOT_RETRY = LOW
+5. AND gate (U7): PGOOD_DELAYED AND NOT_RETRY = LOW
+6. ENABLE_GLOBAL = LOW
+7. Master inverter (U1): ENABLE_GLOBAL → Gate HIGH → FET OFF
+8. System shuts down (5V_OUTPUT = 0V)
+9. After 1 second: RETRY_PULSE returns LOW
+10. ENABLE_GLOBAL = HIGH → System restarts
+11. If latchup cleared → normal operation
+12. If latchup persists → repeat from step 1 (INFINITE RETRY)
+
+OBC MONITORING:
+- OBC monitors device responsiveness (OS heartbeat, network ping, etc.)
+- If device stuck in retry loop (not responding for X seconds)
+- OBC cuts 5V INPUT power to entire device
+- Manual intervention or ground command required to restore power
+
+
+================================================================================
+6. COMPLETE SYSTEM INTEGRATION
+================================================================================
+
+WIRING CHECKLIST (v3.1 SIMPLIFIED):
+===================================
+
+**MASTER SWITCH (Section 3):**
+□ Q1 SOURCE (D2PAK) to 5V INPUT (4mm trace)
+□ Q1 DRAIN (tab) to 5V OUTPUT (thermal vias)
+□ Q1 DRAIN to C1+ (tantalum, check polarity!)
+□ C1- to GND (multiple vias)
+□ R1 (1206, 10kΩ) SOURCE to GATE_NODE
+□ R2 (1206, 100Ω) INV_OUT to GATE_NODE
+□ C2 (1206, 100nF) GATE_NODE to SOURCE
+□ Q1 GATE to GATE_NODE
+□ U1 (SOIC-16) pin 1 to ENABLE_GLOBAL
+□ U1 pin 2 to INV_OUT (through R2)
+□ U1 pins 7 AND 16 to +5V OUTPUT
+□ U1 pin 8 to GND (via)
+□ C3 (1206, 0.1µF) on U1 VCC to GND
+
+**CURRENT SENSE (×6 circuits):**
+□ R_SENSE (WSL2512) Force+ to rail in
+□ R_SENSE Force- to rail out
+□ R_SENSE Sense+ to OP07 pin 3
+□ R_SENSE Sense- to OP07 pin 2
+□ C2 (1206, 0.1µF) from Sense+ to GND
+□ OP07CSZ pin 7 to +5V, pin 4 to GND
+□ C3 (1206, 0.1µF) bypass on OP07
+□ R4 (1206, 10kΩ) pin 3 to GND
+□ R5 (1206, 10kΩ) pin 2 to GND
+□ R6 (1206, 200kΩ) pin 2 to pin 6
+□ OP07 pin 6 to LM139 pin 3
+□ R7, R8 (1206) divider for V_REF
+□ 0.1µF cap from V_REF to GND
+□ V_REF to LM139 pin 2
+□ R9 (1206, 10kΩ) LM139 pin 1 to pin 3
+□ R10 (1206, 10kΩ) LM139 pin 1 to +5V
+□ LM139 pin 11 to +5V, pin 4 to GND
+□ C4 (1206, 0.1µF) bypass on LM139
+□ LM139 pin 1 to FAULT_n
+
+**GLOBAL LOGIC (SIMPLIFIED):**
+□ PMIC_PGOOD to R11 (1206, 1MΩ)
+□ R11 to C5 (1206, 330nF) to GND
+□ C5/R11 junction to U3 (SOIC-14) pin 1
+□ U3 pin 2 to VCC
+□ U3 pin 3 is PGOOD_DELAYED
+□ FAULT_1 to FAULT_6 to U2 (two SOIC-14)
+□ U2 cascade to GLOBAL_FAULT
+□ GLOBAL_FAULT to U4 (SOIC-8) pin 2
+□ U4 timing: R12 (1206, 10MΩ), C6 (1206, 100nF)
+□ U4 pin 3 is RETRY_PULSE
+□ RETRY_PULSE to U8 (SOIC-16) pin 1
+□ U8 pin 2 is NOT_RETRY
+□ PGOOD_DELAYED to U7 (SOIC-14) pin 1
+□ NOT_RETRY to U7 pin 2
+□ U7 pin 3 is ENABLE_GLOBAL
+□ ENABLE_GLOBAL to master U1 pin 1
+□ Check all SOIC power pins
+□ Verify 0.1µF bypass on ALL ICs
+
+**REMOVED (no longer in v3.1):**
+□ ~~Counter (CD4017) - removed~~
+□ ~~Flip-flop (CD4013) - removed~~
+□ ~~POR circuit (10kΩ + 10µF) - removed~~
+□ ~~COUNT_5 signal - removed~~
+□ ~~LATCH_OFF signal - removed~~
+
+**POWER AND GROUND:**
+□ All IC VCC to +5V OUTPUT
+□ All IC GND with vias to ground plane
+□ 0.1µF bypass on EVERY IC
+□ Tantalum caps (check polarity!)
+□ D2PAK thermal vias (10-20)
+□ Ground plane continuous
+
+**TEST POINTS:**
+□ TP1: 5V INPUT
+□ TP2: 5V OUTPUT
+□ TP3: Q1 GATE
+□ TP4: PMIC_PGOOD
+□ TP5: PGOOD_DELAYED
+□ TP6-TP11: FAULT_1 to FAULT_6
+□ TP12: GLOBAL_FAULT
+□ TP13: RETRY_PULSE
+□ TP14: ENABLE_GLOBAL
+□ ~~TP15: COUNT_5~~ (removed)
+□ ~~TP16: LATCH_OFF~~ (removed)
+
+
+TIMING DIAGRAMS:
+===============
+
+NORMAL STARTUP (no faults):
+```
+T=0ms        T=50ms      T=350ms     T=360ms
+  │            │            │           │
+  │ Power ON   │ PMIC       │ Delay     │ System
+  │            │ stable     │ complete  │ running
+  │            │            │           │
+5V INPUT   ────┐            │           │
+           0V  └────────────┴───────────┴────────
+               │            │           │
+PMIC_PGOOD     │            ┌───────────┴────────
+           ────┴────────────┘           │
+               │            │           │
+PGOOD_DELAYED  │            │           ┌────────
+           ────┴────────────┴───────────┘
+               │            │           │
+ENABLE_GLOBAL  │            │           ┌────────
+           ────┴────────────┴───────────┘
+               │            │           │
+5V OUTPUT      │            │           ┌────────
+           ────┴────────────┴───────────┘ ~4.9V
+```
+
+LATCHUP WITH INFINITE RETRY:
+```
+T=0s     T=10µs   T=1.0s    T=1.36s   T=2.36s   ...forever
+  │        │        │         │         │
+  │ Latchup│ Shut   │ Retry#1 │ Retry#2 │
+  │ detect │ down   │         │         │
+  │        │        │         │         │
+FAULT_n ───┐        │         │         │
+       HIGH└────────┴─────────┴─────────┴───── LOW (stuck)
+           │        │         │         │
+GLOBAL_    │        │         │         │
+FAULT  ────┘        │         │         │
+       HIGH└────────┴─────────┴─────────┴───── LOW
+           │        │         │         │
+RETRY_     │        ┌─1sec───┐┌─1sec───┐
+PULSE  ────┴────────┘         └┘        └───── repeats
+       LOW │        │ HIGH    │ HIGH    │
+           │        │         │         │
+ENABLE_    │        │         │         │
+GLOBAL ────┘        │         │         │
+       HIGH└────────┴─────────┴─────────┴───── LOW (off)
+           │        │         │         │
+5V OUTPUT ─┘        │         │         │
+       ~5V └────────┴─────────┴─────────┴───── 0V (cycling)
+
+System cycles forever until:
+- Latchup clears (transient SEL)
+- OBC detects stuck state and cuts 5V INPUT power
+```
+
+OBC INTERVENTION:
+```
+T=0s     ...     T=10s         T=11s
+  │               │             │
+  │ Device stuck  │ OBC decides │ Power cut
+  │ in retry loop │ to intervene│ by OBC
+  │               │             │
+5V OUTPUT ────────┐┐┐┐┐┐┐┐┐┐    │
+(from device) ────┘┘┘┘┘┘┘┘┘┘    │
+cycling 1Hz       │             │
+                  │             │
+OBC monitors      │ No response │
+device heartbeat  │ for 10sec   │
+                  │             │
+OBC 5V INPUT ─────┴─────────────┘
+(to device)       │             └─────── 0V (cut by OBC)
+                  │
+                  └─OBC cuts power permanently
+                    (requires ground command to restore)
+```
+
+
+================================================================================
+7. SIMPLIFIED SMD BILL OF MATERIALS
+================================================================================
+
+COST SUMMARY:
+v3.0 (with counter/latch): ~$850
+v3.1 (infinite retry): ~$806
+SAVINGS: ~$44
+
+MASTER SWITCH (1 set, SMD):
+┌────┬──────────────────────┬──────────┬─────────────────┬─────┬────────┐
+│Qty │ Part Number          │ Ref Des  │ Description     │ Rad │ Cost   │
+├────┼──────────────────────┼──────────┼─────────────────┼─────┼────────┤
+│ 1  │ IRHLUC7970Z4 (D2PAK) │ Q1       │ P-FET switch    │100k │ $50-60 │
+│ 1  │ CD4049UM/883B        │ U1       │ Hex inverter    │100k │ $18-22 │
+│ 1  │ 10kΩ, 1206 SMD       │ R1       │ Pull-up         │N/A  │ $0.50  │
+│ 1  │ 100Ω, 1206 SMD       │ R2       │ Gate drive      │N/A  │ $0.50  │
+│ 1  │ 100µF, 7343 tantalum │ C1       │ Output bulk     │N/A  │ $10    │
+│ 1  │ 100nF, 1206 ceramic  │ C2       │ Gate snubber    │N/A  │ $1     │
+│ 1  │ 0.1µF, 1206 ceramic  │ C3       │ Decoupling      │N/A  │ $1     │
+├────┴──────────────────────┴──────────┴─────────────────┴─────┼────────┤
+│ Subtotal Master Switch:                                       │ $81-95 │
+└───────────────────────────────────────────────────────────────┴────────┘
+
+CURRENT SENSE (×6 sets, SMD):
+┌────┬──────────────────────┬──────────┬─────────────────┬─────┬────────┐
+│Qty │ Part Number          │ Ref Des  │ Description     │ Rad │ Cost   │
+├────┼──────────────────────┼──────────┼─────────────────┼─────┼────────┤
+│ 6  │ WSL2512 (various R)  │ R_SENSE  │ Sense res. SMD  │Pass │ $18    │
+│ 6  │ OP07CSZ/883B         │ U_AMP    │ Op-amp SOIC-8   │100k │ $150   │
+│ 2  │ LM139AMWC/883C       │ U_COMP   │ Comp SOIC-14    │100k │ $60    │
+│ 36 │ 1206 SMD resistors   │ R4-R10   │ Support         │N/A  │ $18    │
+│ 18 │ 0.1µF, 1206 ceramic  │ C2-C4    │ Decoupling      │N/A  │ $18    │
+├────┴──────────────────────┴──────────┴─────────────────┴─────┼────────┤
+│ Subtotal Current Sense:                                       │ $264   │
+└───────────────────────────────────────────────────────────────┴────────┘
+
+GLOBAL LOGIC (1 set, SMD, SIMPLIFIED):
+┌────┬──────────────────────┬──────────┬─────────────────┬─────┬────────┐
+│Qty │ Part Number          │ Ref Des  │ Description     │ Rad │ Cost   │
+├────┼──────────────────────┼──────────┼─────────────────┼─────┼────────┤
+│ 2  │ CD4072BM/883B        │ U2       │ OR SOIC-14      │100k │ $44    │
+│ 1  │ CD4093BM/883B        │ U3       │ Schmitt SOIC-14 │100k │ $20    │
+│ 1  │ LM555CM/883C         │ U4       │ Timer SOIC-8    │100k │ $28    │
+│ 1  │ CD4081BM/883B        │ U7       │ AND SOIC-14     │100k │ $18    │
+│ 1  │ CD4049UM/883B        │ U8       │ Inv SOIC-16     │100k │ $18    │
+│ 8  │ 1206 SMD resistors   │ R11-R12  │ Timing, bias    │N/A  │ $5     │
+│    │ (includes 10MΩ)      │          │                 │     │        │
+│ 6  │ 1206/1210 SMD caps   │ C5-C7    │ Timing, bypass  │N/A  │ $6     │
+├────┴──────────────────────┴──────────┴─────────────────┴─────┼────────┤
+│ Subtotal Global Logic (v3.1 simplified):                      │ $139   │
+└───────────────────────────────────────────────────────────────┴────────┘
+
+REMOVED COMPONENTS FROM v3.0:
+┌────┬──────────────────────┬──────────┬─────────────────┬─────┬────────┐
+│Qty │ Part Number          │ Ref Des  │ Description     │ Rad │ Savings│
+├────┼──────────────────────┼──────────┼─────────────────┼─────┼────────┤
+│ 1  │ CD4017BM/883B        │ U5       │ Counter (gone)  │100k │ -$22   │
+│ 1  │ CD4013BM/883B        │ U6       │ Flip-flop (gone)│100k │ -$20   │
+│ 1  │ 10kΩ, 1206           │ POR R    │ Reset res (gone)│N/A  │ -$0.50 │
+│ 1  │ 10µF, 1210           │ POR C    │ Reset cap (gone)│N/A  │ -$2    │
+├────┴──────────────────────┴──────────┴─────────────────┴─────┼────────┤
+│ Total components removed:                                     │ -$44.50│
+└───────────────────────────────────────────────────────────────┴────────┘
+
+ADDITIONAL COMPONENTS (SMD):
+┌────┬──────────────────────┬──────────┬─────────────────┬─────┬────────┐
+│Qty │ Description          │ Location │ Purpose         │ Rad │ Cost   │
+├────┼──────────────────────┼──────────┼─────────────────┼─────┼────────┤
+│ 6  │ 100µF, 7343 tant.    │ Per rail │ Rail filtering  │N/A  │ $60    │
+│ 15 │ 10µF, 1210 ceramic   │ Distrib. │ Local bulk      │N/A  │ $30    │
+│ 50 │ 0.1µF, 1206 ceramic  │ Every IC │ Decoupling      │N/A  │ $50    │
+│ 18 │ SMD test points      │ Various  │ Debug (2 fewer) │N/A  │ $9     │
+│ 1  │ PCB (4-layer, SMD)   │ N/A      │ 75×55mm board   │N/A  │ $90    │
+│ 1  │ Stencil (SMD)        │ N/A      │ Solder paste    │N/A  │ $50    │
+├────┴──────────────────────┴──────────┴─────────────────┴─────┼────────┤
+│ Subtotal Additional (v3.1):                                   │ $289   │
+└───────────────────────────────────────────────────────────────┴────────┘
+
+╔═══════════════════════════════════════════════════════════════════════╗
+║ TOTAL v3.1 SMD BOM COST: $81 + $264 + $139 + $289 = $773             ║
+║                                                                       ║
+║ v3.0 cost: ~$850                                                      ║
+║ v3.1 cost: ~$773                                                      ║
+║ SAVINGS: ~$77 (9% reduction)                                          ║
+║                                                                       ║
+║ PCB AREA COMPARISON:                                                  ║
+║ - v3.0: 4,800 mm² (80mm × 60mm)                                      ║
+║ - v3.1: 4,125 mm² (75mm × 55mm)                                      ║
+║ - REDUCTION: 675 mm² (14% smaller)                                   ║
+║                                                                       ║
+║ IC COUNT:                                                             ║
+║ - v3.0: 17 ICs                                                        ║
+║ - v3.1: 15 ICs                                                        ║
+║ - REDUCTION: 2 fewer ICs                                              ║
+╚═══════════════════════════════════════════════════════════════════════╝
+
+COMPONENT SOURCING (same as v3.0):
+----------------------------------
+
+Long-lead items (12-16 weeks):
+1. IRHLUC7970Z4 D2PAK (verify availability)
+2. OP07CSZ/883B (×6)
+3. LM139AMWC/883C (×2)
+4. All CD4000/883B series SOIC
+5. LM555CM/883C
+
+Suppliers:
+- Rochester Electronics
+- Texas Instruments MilAero
+- Microchip
+- Vishay (WSL2512)
+
+CRITICAL COMPONENT NOTE:
+R12 = 10MΩ in 1206 package may be hard to find.
+Alternatives:
+- 2× 5.1MΩ in series (1206 each)
+- 1× 10MΩ in 2010 package (larger)
+- Change to 1MΩ resistor + 1µF capacitor (same time constant)
+
+
+================================================================================
+8. SMD PCB LAYOUT GUIDELINES (75×55mm)
+================================================================================
+
+BOARD SIZE: 75mm × 55mm (4-layer recommended)
+Previous v3.0: 80mm × 60mm
+REDUCTION: 14% smaller footprint
+
+LAYER STACK (same as v3.0):
+- Layer 1 (Top): Signal + SMD components
+- Layer 2: Ground plane (solid)
+- Layer 3: Power plane (+5V distribution)
+- Layer 4 (Bottom): Additional signals
+
+SMD ZONE LAYOUT (OPTIMIZED for 75×55mm):
+
+    ┌─────────────────────────────────────────────────────┐
+    │ 75mm × 55mm board                                   │
+    ├─────────────────────────────────────────────────────┤
+    │ ZONE 1: Master Switch (20×20mm, top-left)           │
+    │ - Q1 (D2PAK), U1 (SOIC-16), SMD passives           │
+    ├─────────────────────────────────────────────────────┤
+    │ ZONE 2: Current Sense (55×28mm, center)             │
+    │ - 6 SMD sense circuits in 2 rows of 3               │
+    │ - Slightly tighter spacing than v3.0                │
+    ├─────────────────────────────────────────────────────┤
+    │ ZONE 3: Global Logic (35×25mm, bottom-right)        │
+    │ - 5 SOIC ICs (was 7 in v3.0)                        │
+    │ - 2 fewer ICs = more space for routing              │
+    └─────────────────────────────────────────────────────┘
+
+SPACE SAVINGS ANALYSIS:
+- Counter IC removed: ~120 mm² saved
+- Flip-flop IC removed: ~90 mm² saved
+- POR components removed: ~50 mm² saved
+- Simplified routing: ~115 mm² saved
+- Total savings: ~375 mm² (allows 75×55mm vs 80×60mm)
+
+SMD LAYOUT RULES (same as v3.0):
+--------------------------------
+(All rules from v3.0 Section 8 apply unchanged)
+
+Key points:
+- D2PAK thermal vias: 10-20 vias, 0.3mm diameter
+- SOIC spacing: Can be 2-3mm between ICs
+- 1206 passives: <2mm from IC pins for bypass caps
+- WSL2512: 4-pad Kelvin connection
+- Trace widths: 4mm (power), 0.25-0.3mm (signals)
+- Ground plane: Solid, no splits
+
+SIMPLIFIED LOGIC SECTION LAYOUT:
+--------------------------------
+
+v3.0 logic section (7 ICs):
+```
+[U2-1] [U2-2] [U3]
+[U4]   [U5]   [U6]
+[U7]   [U8]
+```
+
+v3.1 logic section (5 ICs):
+```
+[U2-1] [U2-2] [U3]
+[U4]   [U7]   [U8]
+
+(U5 counter removed)
+(U6 flip-flop removed)
+```
+
+More space for:
+- Power routing
+- Test points
+- Thicker traces
+- Better EMI performance
+
+
+================================================================================
+9. SMD ASSEMBLY NOTES
+================================================================================
+
+ASSEMBLY PROCESS (same as v3.0):
+--------------------------------
+
+1. Solder paste application
+2. Component placement
+3. Reflow soldering (240-260°C peak)
+4. Inspection
+5. Rework if needed
+6. Testing
+
+SIMPLIFIED ASSEMBLY (v3.1 vs v3.0):
+- 2 fewer SOIC ICs to place
+- 3 fewer passives (POR circuit)
+- Slightly faster assembly time
+- Fewer potential solder bridges (fewer IC pins)
+
+CRITICAL ASSEMBLY NOTES:
+- D2PAK thermal vias critical
+- Tantalum polarity (stripe = negative)
+- R12 = 10MΩ (high value, verify placement)
+- All SOIC pins must be on pads
+- Check for bridges (1.27mm pitch)
+
+(For complete assembly procedures, see v3.0 Section 9)
+
+
+================================================================================
+10. TESTING PROCEDURES
+================================================================================
+
+FUNCTIONAL TESTING (v3.1 DIFFERENCES):
+--------------------------------------
+
+All electrical tests from v3.0 apply, plus:
+
+**TEST: Verify 1 second retry delay**
+- Induce fault on any rail (short load momentarily)
+- Measure RETRY_PULSE width with oscilloscope
+- Should be ~1.0 second ±10%
+Result: Confirms timer circuit correct
+
+**TEST: Verify infinite retry**
+- Induce permanent fault (disconnect load resistor completely)
+- Observe system cycling ON/OFF
+- Count cycles: should continue indefinitely
+- Each cycle: OFF for 1 second, ON for ~360ms, repeat
+Result: System never gives up (no permanent latch)
+
+**TEST: OBC power cutoff simulation**
+- Induce permanent fault
+- Let system cycle for 10-30 seconds
+- Manually remove 5V INPUT power
+- Verify system shuts down completely
+Result: Confirms OBC can interrupt retry loop
+
+REMOVED TESTS (no longer applicable in v3.1):
+- ~~Retry counter test~~ (no counter)
+- ~~Permanent latch test~~ (no latch)
+- ~~COUNT_5 signal test~~ (signal removed)
+- ~~LATCH_OFF signal test~~ (signal removed)
+
+SIGNALS TO MONITOR:
+- FAULT_1 through FAULT_6 (detect which rail failed)
+- GLOBAL_FAULT (overall fault status)
+- RETRY_PULSE (1 second pulse during retry)
+- ENABLE_GLOBAL (master enable to P-FET)
+- 5V_OUTPUT (system power status)
+
+(For complete test procedures, see v3.0 Section 10)
+
+
+================================================================================
+11. FAILURE MODE ANALYSIS
+================================================================================
+
+FAILURE MODES (v3.1 SPECIFIC):
+------------------------------
+
+**NEW FAILURE MODE: Stuck in Infinite Retry Loop**
+- Symptom: System cycles ON/OFF forever (1 second period)
+- Cause: Permanent latchup or damaged component
+- Detection: OBC monitors device unresponsive >10-30 seconds
+- Mitigation: OBC cuts 5V INPUT power to entire device
+- Prevention: None (this is expected behavior for permanent faults)
+- Recovery: Ground command to restore power, investigate cause
+
+**IMPROVED: No False Permanent Lockout**
+- v3.0 could permanently disable after 5 false trips
+- v3.1 keeps trying, so transient faults always recover
+- Benefit: More robust recovery from temporary issues
+
+**CONSIDERATION: Component Wear from Cycling**
+If device stuck in retry loop for extended period:
+- Buck converter stress: ~1 power cycle per second
+- PMIC stress: Repeated soft-start sequences
+- P-FET stress: Thermal cycling every second
+- Tantalum caps: Inrush current cycling
+
+However:
+- OBC monitoring prevents extended cycling
+- Most macro-SEL events are transient (clear within seconds)
+- 1 second delay significantly reduces stress vs 100ms
+
+**OTHER FAILURE MODES:**
+(All failure modes from v3.0 still apply)
+
+See v3.0 Section 11 for complete failure mode analysis of:
+- Current sense circuits
+- Op-amp failures
+- Comparator failures
+- Timer failures
+- P-FET failures
+- SMD-specific failures (bridges, cold joints, etc.)
+
+
+================================================================================
+END OF v3.1 DESIGN DOCUMENT
+================================================================================
+
+SUMMARY OF v3.1 CHANGES:
+=======================
+
+REMOVED:
+- Retry counter (CD4017BM/883B)
+- Permanent latch (CD4013BM/883B)
+- Power-on reset circuit (10kΩ + 10µF)
+- COUNT_5 signal
+- LATCH_OFF signal
+- NOT_LATCH_OFF signal
+
+CHANGED:
+- Retry delay: 100ms → 1 second
+- Timer resistor: 1MΩ → 10MΩ
+- Enable logic: 3-input AND → 2-input AND
+- PCB size: 80×60mm → 75×55mm
+- Test points: 16 → 14 (removed 2)
+
+BENEFITS:
+- Simpler circuit (2 fewer ICs)
+- Lower cost ($850 → $773, saves $77)
+- Smaller PCB (14% reduction)
+- Infinite retry (never gives up)
+- Reduced component stress (1s vs 100ms delay)
+- OBC safety net (monitors and cuts power)
+
+DESIGN PHILOSOPHY:
+- Hardware detects and responds to latchup (<20µs)
+- System attempts infinite recovery (1 second retry delay)
+- OBC monitors overall system health
+- OBC cuts power if device stuck/unresponsive
+- Simple, robust, relies on external intelligence (OBC)
+
+CRITICAL REMINDERS:
+1. R12 = 10MΩ (verify availability in 1206, or use alternatives)
+2. No retry limit - system cycles forever until latchup clears or OBC intervenes
+3. OBC must monitor device and cut power if needed
+4. Tantalum polarity critical (stripe = negative)
+5. D2PAK thermal vias essential (10-20 vias)
+6. All /883B suffix ICs for flight (not commercial /EM)
+
+NEXT STEPS:
+1. Verify 10MΩ resistor availability (1206 or 2010 size)
+2. Confirm OBC monitoring capability and timeout duration
+3. Generate Gerber files for 75×55mm PCB
+4. Order stencil and components
+5. Assemble and test
+6. Validate 1 second retry delay
+7. Test infinite retry behavior
+8. Integrate with OBC monitoring
+9. Environmental testing
+10. Flight qualification

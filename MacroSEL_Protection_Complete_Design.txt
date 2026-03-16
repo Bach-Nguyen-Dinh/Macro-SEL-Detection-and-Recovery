@@ -1,0 +1,1332 @@
+================================================================================
+MACRO-SEL PROTECTION SYSTEM - COMPLETE DESIGN PACKAGE
+Space-Qualified Edge Computer for LEO Orbit
+================================================================================
+
+Document Version: 1.0
+Date: February 2026
+Application: ARM Cortex-A72 Edge Computer with AI Cores, DDR4, eMMC
+Mission Profile: LEO, 1+ year, 10 krad/year TID
+Design Philosophy: Hardware-only, interconnected shutdown, 5 retry attempts
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+1. SYSTEM ARCHITECTURE OVERVIEW
+2. DETAILED SCHEMATIC: SINGLE RAIL PROTECTION CIRCUIT
+3. GLOBAL LOGIC & RETRY CONTROLLER SCHEMATIC
+4. FULL 6-RAIL SYSTEM INTEGRATION
+5. COMPLETE BILL OF MATERIALS (BOM)
+6. PCB LAYOUT GUIDELINES
+7. TESTING & VALIDATION PROCEDURES
+8. FAILURE MODE & EFFECTS ANALYSIS (FMEA)
+9. DESIGN VERIFICATION CHECKLIST
+
+================================================================================
+1. SYSTEM ARCHITECTURE OVERVIEW
+================================================================================
+
+PROTECTION STRATEGY:
+- 6 independent protection circuits (one per power rail)
+- Interconnected shutdown: ANY rail fault → ALL rails shut down
+- Hardware-only auto-retry: 5 attempts with 100ms delay
+- After 5 failures: Permanent latch-off until power cycle
+- 300ms startup delay from PMIC PGOOD signal
+
+PROTECTED RAILS:
+Rail #1: 3.3V @ 5A  (AI Core #1)
+Rail #2: 3.3V @ 5A  (AI Core #2)
+Rail #3: 1.2V @ 3A  (CPU + DDR4 RAM)
+Rail #4: 1.35V @ 400mA (CPU)
+Rail #5: 1.8V @ 2A  (CPU + eMMC)
+Rail #6: 2.5V @ 1A  (CPU + DDR4 RAM)
+
+RESPONSE TIME TARGET: <20µs (well within macro-SEL damage threshold of ~100µs)
+
+RADIATION TOLERANCE: All protection components rated 50-100+ krad TID
+
+================================================================================
+2. DETAILED SCHEMATIC: SINGLE RAIL PROTECTION CIRCUIT (TYPICAL)
+================================================================================
+
+This schematic applies to ONE rail. Replicate 6 times with component values
+adjusted per rail specifications.
+
+Example: Rail #3 (1.2V @ 3A - CPU + DDR4 RAM)
+
+┌────────────────────────────────────────────────────────────────────────┐
+│                     SINGLE RAIL PROTECTION CIRCUIT                      │
+│                          (Typical - 1.2V 3A Rail)                       │
+└────────────────────────────────────────────────────────────────────────┘
+
+INPUT (from PMIC)                                   OUTPUT (to Load - CPU/RAM)
+    │                                                        │
+    ├─────[R_SENSE: 20mΩ, 2W]─────┬──────[P_FET]──────────┤
+    │                              │       Q1               │
+    │                              │                        │
+    │  ┌──[R1: 10kΩ]──┬──────────┤GATE                    │
+    │  │              │            │                        │
+    │  │              │            │SOURCE                  │
+    │  │              └────────────┤                        │
+    │  │                           │                        │
+    │  │                           │DRAIN                   │
+    │  │                           └────────────────────────┤
+    │  │                                                    │
+    │  │  CURRENT SENSE AMPLIFIER (OP07)                   │
+    │  │                                                    │
+    │  │      V_SENSE+              V_SENSE-               │
+    │  │          │                     │                  │
+    │  │          ↓                     ↓                  │
+    │  │      ┌───────────────────────────┐               │
+    │  │      │         OP07              │               │
+    │  │      │    (Diff Amplifier)       │               │
+    │  │      │      Gain = 20            │               │
+    │  │      └──────────┬────────────────┘               │
+    │  │                 │ V_AMP (0-2V range)             │
+    │  │                 │                                │
+    │  │                 │                                │
+    │  │      COMPARATOR & LATCH                          │
+    │  │                 │                                │
+    │  │                 ↓                                │
+    │  │      ┌───────────────────────┐                   │
+    │  │      │     LM139AJ           │                   │
+    │  │  ┌───┤+  (Threshold: 70mV×20 │                   │
+    │  │  │   │      = 1.4V)          │                   │
+    │  │  │V_REF -                    │                   │
+    │  │  │   └─────────┬─────────────┘                   │
+    │  │  │             │ FAULT_RAW                       │
+    │  │  │             │                                 │
+    │  │  │             ↓                                 │
+    │  │  │   ┌──────────────────────┐                   │
+    │  │  │   │   CD4013BE           │                   │
+    │  │  │   │   D Flip-Flop        │                   │
+    │  │  └───┤D                     Q├───┐               │
+    │  │      │                       │   │ FAULT_LATCHED │
+    │  │  ┌───┤CLK              /Q    │   │ (to Global OR)│
+    │  │  │   │                       │   │               │
+    │  │  │   │         RESET ────────┤───┘               │
+    │  │  │   └───────────────────────┘   │               │
+    │  │  │                               │               │
+    │  │  │                               │               │
+    │  │  │   GATE DRIVER LOGIC           │               │
+    │  │  │                               │               │
+    │  │  │   ENABLE_GLOBAL ──┐           │               │
+    │  │  │                   │           │               │
+    │  │  │                   ↓           │               │
+    │  │  │            ┌─────────────┐    │               │
+    │  │  │            │  CD4081BE   │    │               │
+    │  │  │            │  (AND gate) │    │               │
+    │  │  └────────────┤             │    │               │
+    │  │               └──────┬──────┘    │               │
+    │  │                      │ GATE_CTRL │               │
+    │  │                      └───────────┴───[R2: 100Ω]──┘
+    │  │
+    │  └──────────────────────────────────────────────[R3: 10kΩ to VIN]
+    │
+    └───────────────────────────[Bulk Cap: 100µF]─────────GND
+
+
+COMPONENT VALUES FOR RAIL #3 (1.2V @ 3A):
+
+R_SENSE:  20mΩ, 2W (Vishay WSL2512 or equivalent)
+          Normal: 3A × 20mΩ = 60mV
+          Trip: 3.5A × 20mΩ = 70mV
+
+Q1:       IRHLUC7970Z4 (P-channel MOSFET, rad-hard, 100V, 30mΩ RDS(on))
+          or IRH8S9N50R (alternative)
+
+U1:       OP07CP (Bipolar op-amp, 100+ krad TID, QML available)
+          Configured as differential amplifier, Gain = 20
+          Output: 60mV × 20 = 1.2V (normal), 70mV × 20 = 1.4V (trip)
+
+U2:       LM139AJ/883C (Quad comparator, 100+ krad TID, QML)
+          V_REF = 1.3V (set by voltage divider)
+          Hysteresis: 50mV via positive feedback
+
+U3:       CD4013BE/883B (Dual D Flip-Flop, 100+ krad TID, CMOS)
+          Latches fault condition until RESET pulse
+
+U4:       CD4081BE/883B (Quad 2-input AND gate, 100+ krad TID, CMOS)
+          Gates ENABLE with latched fault signal
+
+R1:       10kΩ (pull-up for P-FET gate)
+R2:       100Ω (gate drive resistor, limits dI/dt)
+R3:       10kΩ (pull-down when FET should be off)
+
+All resistors: Metal film, 1%, 0.1W minimum
+All capacitors: Ceramic C0G/NP0 or tantalum, space-qualified
+
+
+SENSE RESISTOR & TRIP THRESHOLD TABLE FOR ALL 6 RAILS:
+
+┌─────────┬────────────┬────────┬─────────┬──────────┬────────────┬──────────┐
+│  Rail   │  Voltage   │ Normal │  Trip   │ R_SENSE  │  V_SENSE   │  V_AMP   │
+│         │            │ Current│ Current │          │  @ Trip    │  @ Trip  │
+├─────────┼────────────┼────────┼─────────┼──────────┼────────────┼──────────┤
+│ AI #1   │ 3.3V       │ 5.0A   │ 5.8A    │ 10mΩ, 2W │ 58mV       │ 1.16V    │
+│ AI #2   │ 3.3V       │ 5.0A   │ 5.8A    │ 10mΩ, 2W │ 58mV       │ 1.16V    │
+│ CPU/RAM │ 1.2V       │ 3.0A   │ 3.5A    │ 20mΩ, 2W │ 70mV       │ 1.40V    │
+│ CPU     │ 1.35V      │ 0.4A   │ 0.5A    │ 100mΩ, 1W│ 50mV       │ 1.00V    │
+│ CPU/eMMC│ 1.8V       │ 2.0A   │ 2.3A    │ 30mΩ, 1W │ 69mV       │ 1.38V    │
+│ CPU/RAM │ 2.5V       │ 1.0A   │ 1.2A    │ 50mΩ, 1W │ 60mV       │ 1.20V    │
+└─────────┴────────────┴────────┴─────────┴──────────┴────────────┴──────────┘
+
+Note: Amplifier gain = 20 for all rails
+      Comparator V_REF adjusted per rail (trip voltage × 20)
+
+
+SIGNAL NAMES & INTERCONNECTIONS:
+
+Per-Rail Signals:
+- FAULT_LATCHED_n (where n = 1 to 6): Goes to Global OR gate
+- ENABLE_GLOBAL: Comes from Global Logic, enables all protection circuits
+
+Power Connections:
+- VIN_n: Input from PMIC for each rail
+- VOUT_n: Output to load for each rail
+- VDD_LOGIC: +5V for logic ICs (from main 5V bus)
+- GND: Common ground
+
+================================================================================
+3. GLOBAL LOGIC & RETRY CONTROLLER SCHEMATIC
+================================================================================
+
+This circuit manages:
+1. 300ms startup delay from PMIC PGOOD
+2. Fault aggregation from all 6 rails
+3. Retry counter (5 attempts)
+4. 100ms inter-retry delay
+5. Permanent latch-off after 5 failures
+
+┌────────────────────────────────────────────────────────────────────────┐
+│                   GLOBAL LOGIC & RETRY CONTROLLER                       │
+└────────────────────────────────────────────────────────────────────────┘
+
+
+SECTION A: STARTUP DELAY (300ms from PMIC PGOOD)
+
+PMIC_PGOOD ──┬─────[R4: 1MΩ]───┬───────┐
+             │                  │       │
+             │                  │       ↓
+             │              [C1: 330nF] │  ┌──────────────────┐
+             │                  │       │  │   CD4093BE       │
+             │                  │       └──┤  Schmitt Trigger │
+             │                  │          │   (Buffer)       │
+             └──────────────────┴──────────┤                  ├──→ PGOOD_DELAYED
+                                            └──────────────────┘
+
+Time constant: τ = R4 × C1 = 1MΩ × 330nF = 330ms
+
+
+SECTION B: FAULT AGGREGATION (6-input OR gate)
+
+FAULT_LATCHED_1 ──┐
+FAULT_LATCHED_2 ──┤
+FAULT_LATCHED_3 ──┤  ┌──────────────────┐
+FAULT_LATCHED_4 ──┼──┤   CD4072BE       │
+FAULT_LATCHED_5 ──┤  │   (Dual 4-input  │
+FAULT_LATCHED_6 ──┘  │    OR gate)      ├───→ GLOBAL_FAULT
+                     └──────────────────┘
+
+Note: Use 2× CD4072BE to implement 6-input OR
+      (each CD4072BE has dual 4-input OR gates)
+
+
+SECTION C: RETRY TIMER (100ms delay generator)
+
+GLOBAL_FAULT ──→ Trigger
+
+                 ┌──────────────────────┐
+                 │      LM555CN         │
+                 │  (Monostable timer)  │
+                 │                      │
+   VDD ──[R5]────┤DISCH        OUT      ├───→ RETRY_PULSE (100ms pulse)
+          │      │                      │
+          │      │                      │
+       [C2]──────┤THRESH         GND    │
+          │      │                      │
+          │      │TRIG                  │
+          │      └──────────────────────┘
+          │          ↑
+          │          │
+        [R6]─────────┴──── GLOBAL_FAULT (inverted trigger)
+          │
+         GND
+
+Component Values:
+R5 = 1MΩ
+C2 = 100nF
+R6 = 10kΩ (trigger resistor)
+
+Time delay: t = 1.1 × R5 × C2 = 1.1 × 1MΩ × 100nF = 110ms
+
+
+SECTION D: RETRY COUNTER (counts fault events, max = 5)
+
+RETRY_PULSE ──→ CLK
+
+                 ┌──────────────────────┐
+                 │      CD4017BE        │
+                 │   (Decade Counter)   │
+                 │                      │
+   RETRY_PULSE ──┤CLK              Q0   ├───→ (unused)
+                 │                 Q1   ├───→ (unused)
+                 │                 Q2   ├───→ (unused)
+                 │                 Q3   ├───→ (unused)
+                 │                 Q4   ├───→ (unused)
+                 │                 Q5   ├───→ COUNT_5 (5th retry)
+                 │                 Q6-9 ├───→ (unused)
+                 │                      │
+   POWER_CYCLE ──┤RESET                 │
+                 └──────────────────────┘
+
+
+SECTION E: PERMANENT LATCH (after 5 retries, latch off)
+
+COUNT_5 ──→ SET
+
+                 ┌──────────────────────┐
+                 │      CD4013BE        │
+                 │     (D Flip-Flop)    │
+                 │                      │
+      VDD ───────┤D                  Q  ├───→ LATCH_OFF
+                 │                      │
+   COUNT_5 ──────┤SET                   │
+                 │                      │
+   POWER_CYCLE ──┤RESET                 │
+                 └──────────────────────┘
+
+
+SECTION F: GLOBAL ENABLE GENERATION
+
+Combines all enable/disable conditions:
+
+ENABLE_GLOBAL = PGOOD_DELAYED AND (NOT LATCH_OFF) AND (NOT RETRY_IN_PROGRESS)
+
+                 ┌──────────────────────┐
+PGOOD_DELAYED ───┤                      │
+                 │    CD4081BE          │
+(NOT LATCH_OFF)──┤    (3-input AND)     ├───→ ENABLE_GLOBAL
+                 │    (configured)      │     (to all 6 protection circuits)
+(NOT RETRY_PROG.)┤                      │
+                 └──────────────────────┘
+
+RETRY_IN_PROGRESS = RETRY_PULSE (active during 100ms retry delay)
+
+
+SECTION G: RESET PULSE GENERATOR (resets all D flip-flops after retry delay)
+
+RETRY_PULSE (falling edge) triggers a short pulse to reset fault latches
+
+                 ┌──────────────────────┐
+RETRY_PULSE ─────┤     Edge Detector    │
+  (falling) ─────┤   (R-C differentiator)├───→ RESET_PULSE (to all fault latches)
+                 └──────────────────────┘
+
+Circuit: Simple RC high-pass filter + diode
+         Rising edge blocks, falling edge passes through as short pulse
+
+
+POWER SUPPLY FOR LOGIC:
+- VDD_LOGIC: +5V (from main 5V power bus)
+- All logic ICs powered from this rail
+- Decouple each IC with 0.1µF + 10µF tantalum local to each IC
+
+
+COMPLETE SIGNAL FLOW:
+
+1. Power-on: PMIC_PGOOD goes high
+2. After 300ms: PGOOD_DELAYED goes high
+3. ENABLE_GLOBAL = HIGH (all protection circuits enabled)
+4. If latchup occurs on any rail → FAULT_LATCHED_n goes HIGH
+5. GLOBAL_FAULT = HIGH (OR of all 6 fault signals)
+6. LM555 triggers: RETRY_PULSE = HIGH for 100ms
+7. During RETRY_PULSE: ENABLE_GLOBAL = LOW (all rails shut down)
+8. After 100ms: RETRY_PULSE falling edge generates RESET_PULSE
+9. RESET_PULSE clears all fault latches, ENABLE_GLOBAL = HIGH (retry)
+10. Retry counter increments (CD4017BE)
+11. Repeat steps 4-10 up to 5 times
+12. On 5th retry: COUNT_5 sets LATCH_OFF permanently
+13. ENABLE_GLOBAL = LOW forever (until power cycle)
+
+================================================================================
+4. FULL 6-RAIL SYSTEM INTEGRATION DIAGRAM
+================================================================================
+
+                        ┌──────────────────────────────────┐
+                        │      PMIC (MC33PF8100EAES)       │
+                        │                                  │
+     5V Input ──────────┤VIN                          PGOOD├──→ To Global Logic
+                        │                                  │
+                        │    1.2V ──────────────────────── ├──→ Rail #3 Input
+                        │    1.35V ─────────────────────── ├──→ Rail #4 Input
+                        │    1.8V ──────────────────────── ├──→ Rail #5 Input
+                        │    2.5V ──────────────────────── ├──→ Rail #6 Input
+                        └──────────────────────────────────┘
+                                         │
+                                         │
+      ┌──────────────────────────────────┴──────────────────────────────┐
+      │                                                                  │
+      │         Buck Converter #1 (LTC3310S)                             │
+      │         3.3V 10A (for both AI cores)                             │
+      │                                                                  │
+      │    3.3V AI ────────────────────────────────────────────────────→ Rail #1 Input
+      │    3.3V AI ────────────────────────────────────────────────────→ Rail #2 Input
+      └──────────────────────────────────────────────────────────────────┘
+
+
+                   ┌─────────────────────────────────────┐
+                   │     GLOBAL LOGIC & RETRY CONTROLLER │
+                   │                                     │
+    PMIC_PGOOD ────┤Input                                │
+                   │                                     │
+    FAULT_1 ───────┤──┐                                  │
+    FAULT_2 ───────┤  │                                  │
+    FAULT_3 ───────┤  ├──→ OR Gate                      │
+    FAULT_4 ───────┤  │                                  │
+    FAULT_5 ───────┤  │                                  │
+    FAULT_6 ───────┤──┘                                  │
+                   │         ↓                           │
+                   │    Retry Logic                      │
+                   │         ↓                           │
+                   │   ENABLE_GLOBAL ────────────────────┼──→ To all 6 protection circuits
+                   │   RESET_PULSE ──────────────────────┼──→ To all 6 fault latches
+                   └─────────────────────────────────────┘
+
+
+        ┌───────────────────────────────────────────────────────────┐
+        │                    6 PROTECTION CIRCUITS                  │
+        │                       (One per rail)                      │
+        ├───────────────────────────────────────────────────────────┤
+        │                                                           │
+        │  Rail #1: 3.3V 5A (AI Core #1)    ──→ Sense → Compare ──┼──→ FAULT_1
+        │  Rail #2: 3.3V 5A (AI Core #2)    ──→ Sense → Compare ──┼──→ FAULT_2
+        │  Rail #3: 1.2V 3A (CPU + RAM)     ──→ Sense → Compare ──┼──→ FAULT_3
+        │  Rail #4: 1.35V 400mA (CPU)       ──→ Sense → Compare ──┼──→ FAULT_4
+        │  Rail #5: 1.8V 2A (CPU + eMMC)    ──→ Sense → Compare ──┼──→ FAULT_5
+        │  Rail #6: 2.5V 1A (CPU + RAM)     ──→ Sense → Compare ──┼──→ FAULT_6
+        │                                                           │
+        │  Each circuit contains:                                  │
+        │  - Sense resistor + amplifier                            │
+        │  - Comparator + latch                                    │
+        │  - P-FET load switch                                     │
+        └───────────────────────────────────────────────────────────┘
+                            ↓            ↓
+                      Outputs to:   Outputs to:
+                    Protected Loads  Global Logic
+
+
+SYSTEM BEHAVIOR SUMMARY:
+
+Normal Operation:
+- All 6 rails powered and monitored
+- Current < threshold → No faults
+- ENABLE_GLOBAL = HIGH
+
+Latchup Event (e.g., on Rail #3):
+1. Current spikes above 3.5A threshold
+2. FAULT_3 goes HIGH
+3. GLOBAL_FAULT = HIGH (via OR gate)
+4. ALL 6 protection circuits disable (ENABLE_GLOBAL = LOW)
+5. Wait 100ms
+6. Reset all latches, ENABLE_GLOBAL = HIGH (1st retry)
+7. Increment retry counter
+8. If latchup recurs → repeat up to 5 times total
+9. After 5th retry → LATCH_OFF permanently until power cycle
+
+================================================================================
+5. COMPLETE BILL OF MATERIALS (BOM)
+================================================================================
+
+PER-RAIL COMPONENTS (×6 sets):
+
+┌──────┬─────────────────────┬──────────┬──────────────────────┬──────────┬────────┐
+│ Qty  │ Part Number         │ Function │ Description          │ Rad Tol. │ Cost   │
+├──────┼─────────────────────┼──────────┼──────────────────────┼──────────┼────────┤
+│  6   │ WSL2512 (various)   │ R_SENSE  │ Current sense        │ Passive  │ $3 ea  │
+│      │   10mΩ, 20mΩ, etc.  │          │ resistor, 1-2W       │ (rad-hard)│       │
+├──────┼─────────────────────┼──────────┼──────────────────────┼──────────┼────────┤
+│  6   │ OP07CP or           │ U1       │ Precision op-amp     │ 100+ krad│ $25 ea │
+│      │ OP07CP/883B (QML)   │          │ for sense amplifier  │          │        │
+├──────┼─────────────────────┼──────────┼──────────────────────┼──────────┼────────┤
+│  2   │ LM139AJ/883C        │ U2       │ Quad comparator      │ 100+ krad│ $30 ea │
+│      │ (each has 4 comps)  │          │ (need 6 total)       │          │        │
+├──────┼─────────────────────┼──────────┼──────────────────────┼──────────┼────────┤
+│  6   │ IRHLUC7970Z4 or     │ Q1       │ P-channel MOSFET     │ 100 krad │ $50 ea │
+│      │ IRH8S9N50R          │          │ load switch          │          │        │
+├──────┼─────────────────────┼──────────┼──────────────────────┼──────────┼────────┤
+│  3   │ CD4013BE/883B       │ U3       │ Dual D flip-flop     │ 100+ krad│ $20 ea │
+│      │ (each has 2 FFs)    │          │ (need 6 total)       │          │        │
+├──────┼─────────────────────┼──────────┼──────────────────────┼──────────┼────────┤
+│  2   │ CD4081BE/883B       │ U4       │ Quad 2-input AND     │ 100+ krad│ $18 ea │
+│      │ (each has 4 ANDs)   │          │ (need 6 total)       │          │        │
+└──────┴─────────────────────┴──────────┴──────────────────────┴──────────┴────────┘
+
+Subtotal per-rail components: ~$146 × 6 = $876
+
+
+GLOBAL LOGIC COMPONENTS (×1 set):
+
+┌──────┬─────────────────────┬──────────┬──────────────────────┬──────────┬────────┐
+│ Qty  │ Part Number         │ Function │ Description          │ Rad Tol. │ Cost   │
+├──────┼─────────────────────┼──────────┼──────────────────────┼──────────┼────────┤
+│  2   │ CD4072BE/883B       │ U5       │ Dual 4-input OR      │ 100+ krad│ $22 ea │
+│      │                     │          │ (for 6-input OR)     │          │        │
+├──────┼─────────────────────┼──────────┼──────────────────────┼──────────┼────────┤
+│  1   │ CD4093BE/883B       │ U6       │ Quad Schmitt trigger │ 100+ krad│ $20    │
+│      │                     │          │ NAND buffer          │          │        │
+├──────┼─────────────────────┼──────────┼──────────────────────┼──────────┼────────┤
+│  1   │ LM555CN/883C        │ U7       │ Timer IC             │ 100+ krad│ $28    │
+│      │                     │          │ (retry delay)        │          │        │
+├──────┼─────────────────────┼──────────┼──────────────────────┼──────────┼────────┤
+│  1   │ CD4017BE/883B       │ U8       │ Decade counter       │ 100+ krad│ $22    │
+│      │                     │          │ (retry counter)      │          │        │
+├──────┼─────────────────────┼──────────┼──────────────────────┼──────────┼────────┤
+│  1   │ CD4013BE/883B       │ U9       │ Dual D flip-flop     │ 100+ krad│ $20    │
+│      │                     │          │ (latch-off FF)       │          │        │
+├──────┼─────────────────────┼──────────┼──────────────────────┼──────────┼────────┤
+│  1   │ CD4081BE/883B       │ U10      │ Quad AND gate        │ 100+ krad│ $18    │
+│      │                     │          │ (enable logic)       │          │        │
+├──────┼─────────────────────┼──────────┼──────────────────────┼──────────┼────────┤
+│  1   │ CD4049UBE/883B      │ U11      │ Hex inverter/buffer  │ 100+ krad│ $18    │
+│      │                     │          │ (logic inversion)    │          │        │
+└──────┴─────────────────────┴──────────┴──────────────────────┴──────────┴────────┘
+
+Subtotal global logic: $170
+
+
+PASSIVE COMPONENTS:
+
+┌──────┬─────────────────────┬──────────┬──────────────────────┬──────────┬────────┐
+│ Qty  │ Description         │ Function │ Specifications       │ Notes    │ Cost   │
+├──────┼─────────────────────┼──────────┼──────────────────────┼──────────┼────────┤
+│  40  │ Resistors (various) │ Biasing  │ 1/8W to 1/4W,        │ Metal    │ $1 ea  │
+│      │ 100Ω - 1MΩ          │ timing   │ 1%, metal film       │ film     │        │
+├──────┼─────────────────────┼──────────┼──────────────────────┼──────────┼────────┤
+│  20  │ Capacitors 0.1µF    │ Decoupl. │ Ceramic C0G/NP0      │ Local to │ $2 ea  │
+│      │                     │          │ 50V, space-qual      │ each IC  │        │
+├──────┼─────────────────────┼──────────┼──────────────────────┼──────────┼────────┤
+│  15  │ Capacitors 10µF     │ Bulk     │ Tantalum or ceramic  │ Power    │ $5 ea  │
+│      │                     │ decoupl. │ 16V min              │ supply   │        │
+├──────┼─────────────────────┼──────────┼──────────────────────┼──────────┼────────┤
+│  6   │ Capacitors 100µF    │ Output   │ Tantalum or ceramic  │ Per rail │ $8 ea  │
+│      │                     │ filter   │ Low ESR, rated for   │ output   │        │
+│      │                     │          │ rail voltage         │          │        │
+├──────┼─────────────────────┼──────────┼──────────────────────┼──────────┼────────┤
+│  3   │ Timing capacitors   │ 555,RC   │ 100nF, 330nF         │ Timing   │ $3 ea  │
+│      │ (330nF, 100nF)      │ networks │ C0G/NP0 ceramic      │ critical │        │
+└──────┴─────────────────────┴──────────┴──────────────────────┴──────────┴────────┘
+
+Subtotal passives: ~$200
+
+
+GRAND TOTAL BOM COST: $876 + $170 + $200 = **$1,246**
+
+Note: Costs are estimates. QML/QMLV space-qualified parts may vary.
+      Long-lead items: MOSFET switches (~12-16 weeks), QML logic ICs (~8-12 weeks)
+
+
+ALTERNATIVE COMPONENT SELECTIONS:
+
+If IRHLUC7970Z4 unavailable:
+- Alternative 1: SI4425DDY-T1-GE3 (vishay, lower cost, ~30 krad)
+- Alternative 2: Custom discrete with bipolar transistors (100% rad-hard)
+
+If OP07CP unavailable:
+- Alternative: LM124A/883 (quad op-amp, lower precision but adequate)
+
+All CD4000 series logic:
+- Widely available in QML/QMLV grades
+- Multiple suppliers (TI, Intersil/Renesas, ON Semi)
+
+================================================================================
+6. PCB LAYOUT GUIDELINES
+================================================================================
+
+CRITICAL LAYOUT REQUIREMENTS FOR SPACE ENVIRONMENT:
+
+A. GENERAL PCB STACK-UP
+   - 4-layer minimum (Signal-Ground-Power-Signal)
+   - 6-layer preferred (S-G-S-P-G-S) for better EMI control
+   - FR-4 acceptable for LEO (consider polyimide for harsher environments)
+   - Copper weight: 2oz minimum for power traces, 1oz for signals
+   - Conformal coating: Yes (required for space, use silicone or acrylic)
+
+
+B. POWER PATH LAYOUT (CRITICAL!)
+
+   For each protection circuit:
+
+   1. SENSE RESISTOR PLACEMENT:
+      - Place R_SENSE as close as possible to input connector/via
+      - Use 4-wire (Kelvin) connection:
+         * Force+ and Force- carry load current (wide, short traces)
+         * Sense+ and Sense- are thin traces directly to op-amp inputs
+      - Keep sense traces away from switching nodes and high-current paths
+      - Minimum trace width for sense lines: 10 mils (0.25mm)
+      - Guard ring around sense traces (optional, for extra noise immunity)
+
+      Layout example (top view):
+      
+      VIN ══════════[Force+]══════[R_SENSE]══════[Force-]════════ VOUT
+                         │                          │
+                    [Sense+]                   [Sense-]
+                         │                          │
+                         └─────→ To OP07 ←──────────┘
+                         (thin traces, 10-15 mils)
+
+
+   2. P-FET MOSFET PLACEMENT:
+      - Place immediately after sense resistor (<5mm spacing if possible)
+      - Minimize trace inductance in drain-source path (use wide, short traces)
+      - Gate trace: Keep <50mm long, use series resistor (100Ω) near gate pin
+      - Source connection: Star-point ground reference for gate driver
+      - Heatsinking: Ensure thermal pad connected to ground plane (or dedicated)
+
+
+   3. POWER TRACE WIDTHS (for 3A continuous, 5A peak):
+      - 1.2V rail @ 3A: 80 mils (2mm) minimum width, 2oz copper
+      - 3.3V rail @ 5A: 120 mils (3mm) minimum width, 2oz copper
+      - Formula: I_max = 0.048 × dT^0.44 × A^0.725
+        (where dT = temperature rise in °C, A = cross-sectional area in mils²)
+      - For space: Derate by 50% (vacuum cooling is worse than air)
+
+
+   4. DECOUPLING CAPACITOR PLACEMENT:
+      - 0.1µF ceramic: <5mm from each IC VDD pin
+      - 10µF tantalum: <10mm from each IC
+      - 100µF bulk: At each rail output, near load connection
+      - Via-in-pad for decoupling caps when possible (low inductance)
+
+
+C. SIGNAL INTEGRITY (COMPARATOR & LOGIC)
+
+   1. V_REF GENERATION:
+      - Use precision voltage divider for comparator reference
+      - Add 0.1µF bypass cap at V_REF node (local to comparator)
+      - Keep V_REF trace <20mm long, away from switching nodes
+
+
+   2. DIGITAL LOGIC TRACES:
+      - Keep clock and pulse signals <50mm long
+      - Use ground guard traces around critical signals (RETRY_PULSE, RESET_PULSE)
+      - Minimize stub lengths on clock inputs (<5mm)
+
+
+   3. FAULT SIGNAL ROUTING:
+      - FAULT_LATCHED_1 to FAULT_LATCHED_6: Route together as bus
+      - Use consistent spacing (50-100 mils between traces)
+      - Avoid crossing power planes or high-current traces
+      - Shielded by ground traces on either side if EMI is concern
+
+
+D. GROUNDING STRATEGY
+
+   Single-point star ground vs. ground plane:
+   - Use ground plane (Layer 2) as primary reference
+   - Create "analog island" for sense amplifier circuits:
+      * Local ground pour for OP07 and comparator
+      * Connect analog island to main ground at ONE point (star)
+   - Digital logic: Use main ground plane (no isolation needed)
+   - Power ground: Separate heavy current return paths from signal ground
+
+   Ground plane stitching:
+   - Place vias every 200-300 mils around perimeter of board
+   - Additional vias near every decoupling capacitor (direct path to plane)
+
+
+E. COMPONENT PLACEMENT STRATEGY
+
+   Zone separation:
+   ┌─────────────────────────────────────────────────┐
+   │  ZONE 1: Input Filtering & Delay                │
+   │  (PGOOD, RC delay, Schmitt trigger)             │
+   │                                                 │
+   ├─────────────────────────────────────────────────┤
+   │  ZONE 2: Protection Circuits (6× identical)     │
+   │  Rail 1 │ Rail 2 │ Rail 3 │ Rail 4 │ Rail 5 │ 6│
+   │  (Sense)(Sense)(Sense)(Sense)(Sense)(Sense)   │
+   │  (each 20×30mm footprint, total ~100×30mm)     │
+   │                                                 │
+   ├─────────────────────────────────────────────────┤
+   │  ZONE 3: Global Logic                           │
+   │  (OR gate, timer, counter, latch)               │
+   │  (Keep compact, ~30×40mm)                       │
+   └─────────────────────────────────────────────────┘
+
+   Keep protection circuits identical and aligned for easy debug/rework.
+
+
+F. THERMAL MANAGEMENT
+
+   1. P-FET MOSFET:
+      - Power dissipation: P = I²·RDS(on)
+        Example: 5A² × 30mΩ = 0.75W per FET
+      - Use thermal vias under FET thermal pad (array of 3×3 vias, 12 mil drill)
+      - Connect to internal ground/power plane for heat spreading
+      - Consider adding external heatsink or larger copper pour if >1W
+
+   2. SENSE RESISTORS:
+      - Power dissipation during latchup: I²·R (can be 1-2W briefly)
+      - Use wide thermal relief connections (not thin "spider" reliefs)
+      - Large copper pour around resistor body for heat spreading
+
+   3. LM555 TIMER:
+      - Can dissipate 100-200mW, provide thermal relief via bottom pad
+
+
+G. EMI/EMC CONSIDERATIONS
+
+   1. Switching transients (P-FET turn-off):
+      - Use snubber across FET drain-source: 100Ω + 100nF in series
+      - Minimize loop area between FET, sense resistor, and output capacitor
+
+   2. Radiated emissions:
+      - Route all high-frequency traces (comparator outputs, clock signals)
+         on inner layers when possible
+      - Keep traces >50 mils away from board edges
+
+   3. Conducted emissions:
+      - Input filtering: Add ferrite bead + 10µF cap on PMIC_PGOOD signal
+      - Use common-mode chokes on power inputs if EMI is critical
+
+
+H. CONFORMAL COATING CONSIDERATIONS
+
+   - Mask off: Sense resistors (for thermal dissipation)
+   - Mask off: Test points and rework areas
+   - Ensure coating thickness: 50-100µm (2-4 mils)
+   - Cure per space specifications (vacuum bake-out required)
+
+
+I. TEST POINTS & DEBUG ACCESS
+
+   Required test points (place on accessible layer):
+   - TP1: PMIC_PGOOD
+   - TP2: PGOOD_DELAYED
+   - TP3: ENABLE_GLOBAL
+   - TP4-TP9: FAULT_LATCHED_1 through FAULT_LATCHED_6
+   - TP10: GLOBAL_FAULT
+   - TP11: RETRY_PULSE
+   - TP12: LATCH_OFF
+   - TP13-TP18: V_AMP outputs (one per rail, for calibration)
+
+   Use castellated holes or small vias (not plated) for semi-permanent access.
+
+
+J. SPACE-SPECIFIC REQUIREMENTS
+
+   1. Tin whisker mitigation:
+      - Use matte tin plating (NOT bright tin)
+      - Or use ENIG (Electroless Nickel Immersion Gold) finish
+
+   2. Outgassing compliance:
+      - PCB material: TML <1.0%, CVCM <0.1% (NASA ASTM E595)
+      - Conformal coating: Space-qualified silicone (DC 1-2577) or acrylic
+
+   3. Vibration/shock mounting:
+      - Use edge-mounted support brackets
+      - Avoid large, unsupported component bodies (>10mm tall)
+      - Add potting to large capacitors (epoxy underfill)
+
+   4. Thermal cycling:
+      - Design for -40°C to +85°C operation (or wider if required)
+      - Avoid mismatched CTE materials near critical junctions
+
+
+K. DESIGN FOR TESTABILITY (DFT)
+
+   - Break-out pads for each rail input/output (allow isolation testing)
+   - Enable/disable jumpers for each protection circuit (debug one rail at a time)
+   - LED indicators for FAULT_LATCHED signals (optional, for ground testing)
+
+================================================================================
+7. TESTING & VALIDATION PROCEDURES
+================================================================================
+
+PHASE 1: COMPONENT-LEVEL TESTING (Before PCB Assembly)
+-------------------------------------------------------
+
+Test 1.1: Sense Resistor Verification
+   Objective: Verify resistance value and power rating
+   Equipment: 4-wire ohmmeter, power supply, electronic load
+   Procedure:
+   1. Measure resistance with 4-wire ohmmeter (target: ±1% tolerance)
+   2. Apply rated current for 10 minutes, measure temperature rise
+   3. Verify temperature rise <50°C at full current
+   Pass/Fail: Resistance within ±1%, temp rise <50°C
+
+Test 1.2: P-FET MOSFET Characterization
+   Objective: Verify RDS(on), gate threshold voltage, switching time
+   Equipment: Curve tracer or parametric analyzer, oscilloscope
+   Procedure:
+   1. Measure RDS(on) at VGS = -5V, VDS = 1V, ID = 1A (target: <50mΩ)
+   2. Measure VGS(th) with ID = 1mA (target: -1 to -3V)
+   3. Apply 10Hz square wave to gate, measure turn-on/off times
+   Pass/Fail: RDS(on) <50mΩ, VGS(th) within datasheet limits, tON/tOFF <1µs
+
+Test 1.3: Op-Amp Offset Voltage
+   Objective: Ensure low offset for accurate current sensing
+   Equipment: Precision voltmeter, power supply
+   Procedure:
+   1. Power op-amp with ±5V
+   2. Short inputs together, measure output voltage
+   3. Calculate input offset: VOS = VOUT / Gain
+   Pass/Fail: VOS <2mV (ideally <500µV for OP07)
+
+Test 1.4: Comparator Propagation Delay
+   Objective: Verify comparator response time
+   Equipment: Function generator, oscilloscope
+   Procedure:
+   1. Apply slow ramp to comparator input (crossing threshold)
+   2. Measure time from input crossing to output transition
+   Pass/Fail: Propagation delay <500ns
+
+
+PHASE 2: PROTECTION CIRCUIT FUNCTIONAL TESTING (Single Rail)
+-------------------------------------------------------------
+
+Test 2.1: Normal Operation (Below Threshold)
+   Objective: Verify protection circuit does not false-trip
+   Equipment: Power supply, electronic load, oscilloscope
+   Procedure:
+   1. Set input voltage to nominal (e.g., 1.2V for Rail #3)
+   2. Apply load current at 90% of trip threshold (e.g., 2.7A for 3A rail)
+   3. Monitor FAULT_LATCHED signal (should remain LOW)
+   4. Observe output voltage (should equal input minus sense drop)
+   Pass/Fail: FAULT_LATCHED = LOW, VOUT stable
+
+Test 2.2: Overcurrent Trip (Above Threshold)
+   Objective: Verify detection and isolation within response time
+   Equipment: Power supply, electronic load (pulsed), oscilloscope
+   Procedure:
+   1. Set input voltage to nominal
+   2. Configure load to pulse from 0A to 120% of trip threshold (e.g., 4.2A)
+   3. Trigger oscilloscope on load pulse rising edge
+   4. Measure time from load current exceeding threshold to P-FET turn-off
+   5. Verify FAULT_LATCHED goes HIGH
+   Pass/Fail: Response time <20µs, FAULT_LATCHED = HIGH
+
+Test 2.3: Latch & Hold
+   Objective: Verify fault remains latched until RESET
+   Equipment: Same as Test 2.2
+   Procedure:
+   1. Trigger overcurrent event
+   2. Verify FAULT_LATCHED = HIGH
+   3. Reduce load current to zero
+   4. Verify FAULT_LATCHED remains HIGH (latched)
+   5. Apply RESET pulse (manually)
+   6. Verify FAULT_LATCHED clears to LOW
+   Pass/Fail: Fault latches and holds until RESET
+
+Test 2.4: P-FET Safe Shutdown
+   Objective: Verify load is isolated during fault
+   Equipment: Power supply, electronic load, oscilloscope
+   Procedure:
+   1. Monitor output voltage during overcurrent trip
+   2. Verify output voltage drops to <0.1V within 10µs of trip
+   Pass/Fail: VOUT <0.1V within 10µs
+
+
+PHASE 3: GLOBAL LOGIC & RETRY CONTROLLER TESTING
+-------------------------------------------------
+
+Test 3.1: Startup Delay (300ms from PGOOD)
+   Objective: Verify enable delay prevents false trips during startup
+   Equipment: Power supply, oscilloscope
+   Procedure:
+   1. Apply PMIC_PGOOD signal (simulate PMIC power-good)
+   2. Trigger oscilloscope on PGOOD rising edge
+   3. Measure time from PGOOD rising to PGOOD_DELAYED rising
+   Pass/Fail: Delay = 300ms ±10%
+
+Test 3.2: Fault Aggregation (6-input OR gate)
+   Objective: Verify any single rail fault triggers global response
+   Equipment: Function generator, oscilloscope
+   Procedure:
+   1. Apply LOW to all 6 FAULT_LATCHED inputs
+   2. Verify GLOBAL_FAULT = LOW
+   3. Set FAULT_LATCHED_n = HIGH (one at a time, n=1 to 6)
+   4. Verify GLOBAL_FAULT = HIGH for each case
+   Pass/Fail: GLOBAL_FAULT responds correctly to any input
+
+Test 3.3: Retry Timer (100ms delay)
+   Objective: Verify timer generates 100ms pulse
+   Equipment: Function generator, oscilloscope
+   Procedure:
+   1. Trigger timer with GLOBAL_FAULT pulse
+   2. Measure RETRY_PULSE duration
+   Pass/Fail: RETRY_PULSE = 100ms ±10%
+
+Test 3.4: Retry Counter (5 attempts)
+   Objective: Verify counter increments and latches off after 5 retries
+   Equipment: Function generator, oscilloscope, frequency counter
+   Procedure:
+   1. Apply 5 pulses to retry counter input (simulate 5 faults)
+   2. Verify LATCH_OFF goes HIGH after 5th pulse
+   3. Apply 6th pulse, verify LATCH_OFF remains HIGH
+   Pass/Fail: LATCH_OFF = HIGH after exactly 5 pulses
+
+Test 3.5: Global Enable Logic
+   Objective: Verify ENABLE_GLOBAL combines all conditions correctly
+   Equipment: Logic analyzer or multi-channel oscilloscope
+   Procedure:
+   1. Monitor PGOOD_DELAYED, LATCH_OFF, RETRY_IN_PROGRESS, ENABLE_GLOBAL
+   2. Verify ENABLE_GLOBAL = HIGH only when:
+      PGOOD_DELAYED = HIGH AND LATCH_OFF = LOW AND RETRY_IN_PROGRESS = LOW
+   3. Test all combinations of input states
+   Pass/Fail: Logic table verified for all states
+
+
+PHASE 4: FULL SYSTEM INTEGRATION TESTING
+-----------------------------------------
+
+Test 4.1: Normal Operation (All 6 Rails)
+   Objective: Verify system operates under normal load conditions
+   Equipment: Multiple power supplies and electronic loads, DAQ system
+   Procedure:
+   1. Power up system (PMIC_PGOOD asserted)
+   2. Wait for 300ms enable delay
+   3. Apply nominal loads to all 6 rails (50-90% of rated current)
+   4. Monitor all 6 outputs for 1 hour continuous operation
+   5. Verify no false trips, all voltages stable
+   Pass/Fail: No faults, all rails within ±2% of nominal voltage
+
+Test 4.2: Single Rail Fault (Interconnected Shutdown)
+   Objective: Verify one rail fault shuts down entire system
+   Equipment: Same as Test 4.1
+   Procedure:
+   1. Operate system under normal load (all 6 rails active)
+   2. Force overcurrent on Rail #3 (use programmable load)
+   3. Verify ALL 6 protection circuits disable simultaneously
+   4. Verify GLOBAL_FAULT = HIGH
+   5. Wait for retry (100ms delay)
+   6. Verify all rails re-enable together
+   Pass/Fail: All rails shut down and restart together
+
+Test 4.3: Retry Sequence (5 attempts)
+   Objective: Verify system retries up to 5 times before permanent latch-off
+   Equipment: Same as Test 4.1, data logger
+   Procedure:
+   1. Configure one rail (e.g., Rail #3) to persistently fault (constant overcurrent)
+   2. Power up system, wait for enable
+   3. Count number of retry cycles before permanent shutdown
+   4. Verify LATCH_OFF = HIGH after 5th retry
+   5. Verify system does not re-enable until power cycle
+   Pass/Fail: Exactly 5 retries before permanent latch-off
+
+Test 4.4: Power Cycle Recovery
+   Objective: Verify system recovers after power cycle
+   Equipment: Same as Test 4.1
+   Procedure:
+   1. After Test 4.3 (system latched off)
+   2. Remove load that was causing fault
+   3. Cycle PMIC_PGOOD (or main power)
+   4. Verify system re-enables and operates normally
+   Pass/Fail: System recovers after power cycle
+
+Test 4.5: Thermal Cycling
+   Objective: Verify operation over full temperature range
+   Equipment: Thermal chamber, same as Test 4.1
+   Procedure:
+   1. Place system in thermal chamber
+   2. Cycle temperature: -40°C → +25°C → +85°C → +25°C
+   3. At each temperature extreme, run Test 4.1 (normal operation)
+   4. Verify trip thresholds remain within ±5% across temperature
+   Pass/Fail: System operates correctly at all temperatures
+
+
+PHASE 5: RADIATION TESTING (Heavy Ion Beam)
+--------------------------------------------
+
+Test 5.1: TID Testing (Cumulative Dose)
+   Objective: Verify protection circuit survives 10 krad TID
+   Equipment: Co-60 gamma source or proton beam
+   Procedure:
+   1. Bias system during irradiation (powered and monitoring)
+   2. Apply cumulative dose up to 15 krad (1.5× mission requirement)
+   3. Measure trip threshold at 0, 5, 10, 15 krad dose points
+   4. Verify functionality at each dose level
+   Pass/Fail: Trip threshold remains within ±10% at 15 krad
+
+Test 5.2: SEE Testing (Single Event Effects)
+   Objective: Verify no single event latchup in protection circuit itself
+   Facility: LBNL 88-Inch Cyclotron or TAMU Cyclotron (heavy ion beam)
+   Procedure:
+   1. Configure system in normal operating mode (all rails powered)
+   2. Expose to heavy ion beam (Kr, Xe ions at LET = 40-75 MeV·cm²/mg)
+   3. Monitor for SEL events in protection circuit components
+   4. If SEL detected, verify protection circuit recovers or isolates
+   5. Test at multiple ion species and energies
+   Pass/Fail: No destructive SEL, any transient SEU recovers within 100ms
+
+Test 5.3: Latchup Injection (Simulated SEL on Load)
+   Objective: Verify protection system responds correctly to real latchup
+   Equipment: Heavy ion beam, high-speed data acquisition
+   Procedure:
+   1. Expose CPU, AI cores, or RAM to heavy ion beam
+   2. Wait for latchup event to occur naturally
+   3. Monitor protection circuit response:
+      - Detection time from latchup onset
+      - Isolation time
+      - Successful recovery after retry
+   4. Verify no damage to load or protection circuit
+   Pass/Fail: Protection system isolates latchup, system recovers
+
+
+PHASE 6: QUALIFICATION & ACCEPTANCE TESTING
+--------------------------------------------
+
+Test 6.1: Vibration Testing (Sine & Random)
+   Standard: MIL-STD-810 or NASA-GEVS
+   Procedure:
+   1. Mount board to vibration table
+   2. Apply sine sweep (5-2000 Hz) at 1-20g
+   3. Apply random vibration (20 Hz-2 kHz) at 14.1 g_rms for 1 minute per axis
+   4. Inspect for:
+      - Solder joint cracks
+      - Component body cracks
+      - Delamination
+   5. Perform functional test (Phase 4) after vibration
+   Pass/Fail: No mechanical failures, functional test passes
+
+Test 6.2: Thermal Vacuum (TVAC) Testing
+   Objective: Verify operation in vacuum at temperature extremes
+   Equipment: Thermal vacuum chamber
+   Procedure:
+   1. Place system in TVAC chamber
+   2. Pump down to <10^-5 Torr
+   3. Cycle temperature: -40°C → +85°C (4 cycles)
+   4. Run functional tests (Phase 4.1, 4.2) at each temperature
+   5. Monitor for corona discharge or arcing (none expected at these voltages)
+   Pass/Fail: System operates correctly in vacuum at all temperatures
+
+Test 6.3: Burn-in (Accelerated Life Testing)
+   Objective: Screen for early-life failures
+   Procedure:
+   1. Operate system at +85°C ambient, full load, 168 hours (1 week)
+   2. Cycle load every 1 hour (0% → 100% → 0%)
+   3. Monitor for:
+      - Drift in trip thresholds
+      - False trips
+      - Component failures
+   4. Perform functional test (Phase 4) after burn-in
+   Pass/Fail: No failures, trip thresholds remain within ±5%
+
+
+TEST DOCUMENTATION:
+-------------------
+For each test, record:
+- Test setup (schematic, equipment list, software version)
+- Measured values (timestamp, voltage, current, timing)
+- Pass/fail criteria
+- Operator name, date, witness (for space qualification)
+- Any anomalies or deviations
+
+Create test report package with:
+- Test plan (this document)
+- Test procedures (detailed step-by-step)
+- Test results (data tables, waveforms, photos)
+- Failure analysis (if any)
+- Qualification summary
+
+================================================================================
+8. FAILURE MODE & EFFECTS ANALYSIS (FMEA)
+================================================================================
+
+PURPOSE:
+Identify potential failure modes in protection system and analyze impact on
+mission-critical edge computer. Determine criticality and mitigation strategies.
+
+SEVERITY SCALE:
+1 = Minor (no impact on mission)
+2 = Moderate (degraded operation, mission continues)
+3 = Major (loss of protected rail, partial system failure)
+4 = Critical (loss of entire system)
+5 = Catastrophic (loss of spacecraft/mission)
+
+OCCURRENCE SCALE:
+1 = Remote (<0.01% per year)
+2 = Low (0.01-0.1% per year)
+3 = Moderate (0.1-1% per year)
+4 = High (1-10% per year)
+5 = Very high (>10% per year)
+
+DETECTION SCALE:
+1 = Always detected (built-in monitoring)
+2 = High probability of detection (test reveals)
+3 = Moderate (may be detected during operations)
+4 = Low (unlikely to detect before failure)
+5 = Cannot detect (latent failure)
+
+RISK PRIORITY NUMBER (RPN) = Severity × Occurrence × Detection
+
+
+FMEA TABLE:
+
+┌────┬──────────────────────┬─────────────────┬─────────────────┬───┬───┬───┬────┬────────────────────┐
+│ ID │ Component/Function   │ Failure Mode    │ Effect          │ S │ O │ D │RPN │ Mitigation         │
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 1  │ Sense Resistor       │ Open circuit    │ No current      │ 3 │ 1 │ 1 │ 3  │ Use high-reliability│
+│    │ (R_SENSE)            │                 │ sensing, FET    │   │   │   │    │ wirewound, 2× rated│
+│    │                      │                 │ stays on,       │   │   │   │    │ power              │
+│    │                      │                 │ no protection   │   │   │   │    │                    │
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 2  │ Sense Resistor       │ Short circuit   │ No voltage      │ 3 │ 1 │ 2 │ 6  │ Kelvin connection  │
+│    │                      │                 │ drop, no        │   │   │   │    │ allows detection   │
+│    │                      │                 │ sensing         │   │   │   │    │ (V_SENSE = 0)      │
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 3  │ Sense Resistor       │ Value drift     │ Incorrect trip  │ 2 │ 2 │ 3 │ 12 │ Use metal film or  │
+│    │                      │ (+20% from TID) │ threshold       │   │   │   │    │ wirewound (stable) │
+│    │                      │                 │ (false trip or  │   │   │   │    │ Periodic cal check │
+│    │                      │                 │ late trip)      │   │   │   │    │                    │
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 4  │ Op-Amp (OP07)        │ Latchup (SEL)   │ Loss of sense   │ 3 │ 2 │ 2 │ 12 │ Use rad-hard bipolar│
+│    │                      │                 │ amplifier,      │   │   │   │    │ op-amp (OP07 is    │
+│    │                      │                 │ no protection   │   │   │   │    │ latchup immune)    │
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 5  │ Op-Amp               │ Offset drift    │ Inaccurate      │ 2 │ 3 │ 3 │ 18 │ Use low-drift part │
+│    │                      │ (TID > 10 krad) │ current sensing │   │   │   │    │ (OP07), design     │
+│    │                      │                 │ (±10-20%)       │   │   │   │    │ margin into thresh.│
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 6  │ Op-Amp               │ Output stuck    │ Comparator      │ 3 │ 1 │ 2 │ 6  │ Use rad-hard part, │
+│    │                      │ high/low        │ always trips or │   │   │   │    │ redundant sensing  │
+│    │                      │                 │ never trips     │   │   │   │    │ (dual op-amps)     │
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 7  │ Comparator (LM139)   │ False trip      │ Spurious        │ 2 │ 2 │ 1 │ 4  │ Add hysteresis,    │
+│    │                      │ (noise)         │ shutdown,       │   │   │   │    │ filter V_AMP signal│
+│    │                      │                 │ system restarts │   │   │   │    │                    │
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 8  │ Comparator           │ No trip (stuck  │ Load not        │ 4 │ 1 │ 3 │ 12 │ Redundant comparator│
+│    │                      │ output low)     │ isolated during │   │   │   │    │ (dual threshold)   │
+│    │                      │                 │ latchup → DAMAGE│   │   │   │    │                    │
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 9  │ Comparator           │ Slow response   │ Delayed trip,   │ 3 │ 2 │ 2 │ 12 │ Use fast comparator│
+│    │                      │ (>10µs)         │ possible load   │   │   │   │    │ (LM139 typ 300ns)  │
+│    │                      │                 │ damage          │   │   │   │    │                    │
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 10 │ D Flip-Flop (CD4013) │ SEU (bit flip)  │ Spurious fault  │ 2 │ 3 │ 1 │ 6  │ CMOS CD4000 series │
+│    │                      │                 │ latch or clear  │   │   │   │    │ has low SEU rate   │
+│    │                      │                 │                 │   │   │   │    │ (~10^-10/bit-day)  │
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 11 │ D Flip-Flop          │ Latchup (SEL)   │ Loss of latch   │ 3 │ 1 │ 2 │ 6  │ Use rad-hard CMOS  │
+│    │                      │                 │ function, no    │   │   │   │    │ (CD4000/883 series)│
+│    │                      │                 │ fault memory    │   │   │   │    │                    │
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 12 │ P-FET MOSFET (Q1)    │ Gate oxide      │ FET always on   │ 4 │ 1 │ 3 │ 12 │ Use rad-hard FET   │
+│    │                      │ rupture (SEGR)  │ (shorted), no   │   │   │   │    │ rated SEGR immune  │
+│    │                      │                 │ isolation → DAM.│   │   │   │    │ (IRHLUC7970Z4)     │
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 13 │ P-FET MOSFET         │ Single Event    │ FET destroyed,  │ 4 │ 1 │ 3 │ 12 │ Use SEB-immune FET │
+│    │                      │ Burnout (SEB)   │ load not        │   │   │   │    │ (rated >43 MeV·cm²)│
+│    │                      │                 │ protected       │   │   │   │    │                    │
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 14 │ P-FET MOSFET         │ RDS(on) increase│ Voltage drop,   │ 2 │ 3 │ 2 │ 12 │ Derate FET (use    │
+│    │                      │ (TID > 10 krad) │ heat dissipation│   │   │   │    │ 50% of rated specs)│
+│    │                      │                 │ increases       │   │   │   │    │                    │
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 15 │ P-FET MOSFET         │ Stuck on (gate  │ Cannot isolate  │ 4 │ 1 │ 2 │ 8  │ Add series diode or│
+│    │                      │ shorted to      │ load, latchup   │   │   │   │    │ backup FET in series│
+│    │                      │ source)         │ continues → DAM.│   │   │   │    │                    │
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 16 │ LM555 Timer          │ Timing drift    │ Retry delay off │ 1 │ 2 │ 3 │ 6  │ Use precision R/C, │
+│    │                      │ (±20%)          │ (80-120ms)      │   │   │   │    │ acceptable for app │
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 17 │ LM555 Timer          │ No output pulse │ No retry, system│ 3 │ 1 │ 2 │ 6  │ Use rad-hard 555   │
+│    │                      │                 │ latches off on  │   │   │   │    │ (LM555/883)        │
+│    │                      │                 │ first fault     │   │   │   │    │                    │
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 18 │ CD4017 Counter       │ SEU (count error│ Incorrect retry │ 2 │ 2 │ 2 │ 8  │ Acceptable (CMOS   │
+│    │                      │ ±1)             │ count (4 or 6   │   │   │   │    │ SEU rate low)      │
+│    │                      │                 │ instead of 5)   │   │   │   │    │                    │
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 19 │ CD4072 OR Gate       │ Stuck output    │ GLOBAL_FAULT    │ 3 │ 1 │ 2 │ 6  │ Use rad-hard CMOS, │
+│    │                      │ low             │ never trips,    │   │   │   │    │ redundant OR path  │
+│    │                      │                 │ no shutdown     │   │   │   │    │                    │
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 20 │ CD4081 AND Gate      │ Stuck output    │ ENABLE_GLOBAL   │ 3 │ 1 │ 2 │ 6  │ Use rad-hard CMOS  │
+│    │                      │ low             │ never enables,  │   │   │   │    │                    │
+│    │                      │                 │ system dead     │   │   │   │    │                    │
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 21 │ Power Supply (5V bus)│ Loss of VDD     │ All protection  │ 5 │ 1 │ 1 │ 5  │ Redundant power    │
+│    │ for logic ICs        │                 │ circuits fail,  │   │   │   │    │ supply, monitoring │
+│    │                      │                 │ loads unprotect.│   │   │   │    │                    │
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 22 │ PCB Trace            │ Open circuit    │ Loss of sense   │ 3 │ 1 │ 3 │ 9  │ Use wide traces,   │
+│    │ (sense signal)       │ (crack from vib)│ signal, no      │   │   │   │    │ conformal coating, │
+│    │                      │                 │ protection      │   │   │   │    │ inspect after vib. │
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 23 │ PCB Trace            │ Short to ground │ False trip      │ 2 │ 1 │ 2 │ 4  │ Design clearances, │
+│    │ (V_AMP or FAULT_n)   │                 │ (spurious       │   │   │   │    │ solder mask, insp. │
+│    │                      │                 │ shutdown)       │   │   │   │    │                    │
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 24 │ Solder Joint         │ Crack (thermal  │ Intermittent    │ 3 │ 2 │ 3 │ 18 │ Use J-lead/gullwing│
+│    │ (BGA or lead)        │ cycling, vib)   │ connection,     │   │   │   │    │ packages, no BGA,  │
+│    │                      │                 │ false trips     │   │   │   │    │ X-ray inspection   │
+├────┼──────────────────────┼─────────────────┼─────────────────┼───┼───┼───┼────┼────────────────────┤
+│ 25 │ Conformal Coating    │ Voids or        │ Conductive      │ 2 │ 2 │ 3 │ 12 │ Proper application,│
+│    │                      │ delamination    │ whiskers grow,  │   │   │   │    │ vacuum bake-out,   │
+│    │                      │                 │ shorts possible │   │   │   │    │ matte tin finish   │
+└────┴──────────────────────┴─────────────────┴─────────────────┴───┴───┴───┴────┴────────────────────┘
+
+
+CRITICAL FAILURE MODES (RPN > 15):
+-----------------------------------
+
+FM #5: Op-Amp Offset Drift (RPN = 18)
+- Mitigation: Use OP07CP (ultra-low drift), calibrate trip thresholds with margin
+- Monitoring: Periodic ground testing to verify threshold accuracy
+
+FM #24: Solder Joint Cracking (RPN = 18)
+- Mitigation: Avoid BGA packages, use leaded components when possible
+- Testing: X-ray inspection after TVAC and vibration testing
+
+FM #8: Comparator No-Trip (RPN = 12)
+- Mitigation: Redundant comparator with slightly lower threshold as backup
+- Monitoring: Built-in self-test (BIST) circuit to verify comparator function
+
+
+SINGLE POINT FAILURES (NO MITIGATION):
+---------------------------------------
+
+1. P-FET Gate Oxide Rupture (FM #12)
+   - Use SEGR-immune FET (IRHLUC7970Z4 rated to 75 MeV·cm²/mg)
+   - Acceptable risk: <0.1% over 1 year mission
+
+2. Sense Resistor Open Circuit (FM #1)
+   - Use high-reliability wirewound resistor
+   - Consider redundant sense path (dual resistors in parallel)
+   - Acceptable risk: <0.01% over 1 year mission
+
+3. Power Supply Loss (FM #21)
+   - System-level redundancy (dual power supply for critical functions)
+   - Outside scope of this protection system
+
+
+DESIGN IMPROVEMENTS TO REDUCE RPN:
+-----------------------------------
+
+1. Add redundant sensing (dual sense resistors + dual op-amps)
+   - Reduces RPN for FM #1, #4, #5 by factor of 10
+   - Cost: +6 resistors, +6 op-amps (~$200)
+   - Recommended for mission-critical applications
+
+2. Add backup P-FET in series per rail
+   - Reduces RPN for FM #15 by factor of 10
+   - Cost: +6 FETs (~$300)
+   - Recommended for highest reliability
+
+3. Add Built-In Self-Test (BIST) circuit
+   - Periodically injects known current to verify protection response
+   - Detects failures in FM #2, #6, #8 before actual latchup event
+   - Cost: +1 microcontroller + mux (~$100)
+   - Recommended for long-duration missions (>1 year)
+
+
+================================================================================
+9. DESIGN VERIFICATION CHECKLIST
+================================================================================
+
+Before finalizing design and proceeding to fabrication, verify:
+
+SCHEMATIC REVIEW:
+☐ All component values calculated correctly (sense resistors, R/C timing)
+☐ All power pins connected (VDD, GND on every IC)
+☐ Decoupling capacitors present on every IC (0.1µF + 10µF)
+☐ Gate drive resistors on all P-FETs (prevents ringing)
+☐ Hysteresis on all comparators (prevents oscillation)
+☐ Pull-up/pull-down resistors on all logic inputs (no floating pins)
+☐ Reset circuitry functional (RESET pulse generator verified)
+☐ Enable logic correct (Boolean algebra verified)
+☐ Interconnections between 6 rails verified (FAULT_n to OR gate)
+☐ Test points accessible for all critical signals
+
+COMPONENT SELECTION:
+☐ All ICs available in QML/QMLV grades (check lead time)
+☐ Radiation tolerance verified (TID rating > 50 krad for all parts)
+☐ P-FET rated for SEGR/SEB immunity (LET > 43 MeV·cm²/mg)
+☐ Sense resistors power rating adequate (2× normal power dissipation)
+☐ All passives suitable for space (ceramic C0G, metal film resistors)
+☐ Alternate components identified (in case of obsolescence)
+☐ BOM cost within budget ($1,000-2,500 target)
+
+PCB LAYOUT:
+☐ 4-wire Kelvin connection on all sense resistors
+☐ Power trace widths adequate (>80 mils for 3A, derated for vacuum)
+☐ Sense signal traces shielded from high-current paths
+☐ Ground plane continuity verified (no splits under analog circuits)
+☐ Decoupling capacitors <5mm from IC pins
+☐ P-FET placement allows heatsinking (thermal vias under pad)
+☐ Thermal analysis performed (worst-case power dissipation)
+☐ Design rules verified (trace width, spacing, via size)
+☐ Conformal coating clearances (mask off sense resistors)
+☐ Test points accessible with spring-loaded probes
+
+ANALYSIS & SIMULATION:
+☐ Response time calculated (detection + isolation < 20µs)
+☐ Power dissipation calculated (P-FET, sense resistor, op-amp)
+☐ Worst-case trip threshold verified (component tolerance ±5%)
+☐ Retry timing verified (100ms ±10%)
+☐ Startup delay verified (300ms ±10%)
+☐ Thermal cycling range verified (-40°C to +85°C)
+☐ EMI/EMC compliance (if required, CISPR25 for conducted/radiated)
+
+TESTING PREPARATION:
+☐ Test procedures written (Phase 1-6)
+☐ Test equipment identified and available
+☐ Heavy ion beam facility scheduled (6-12 month lead time)
+☐ Test fixtures designed (allow access to test points)
+☐ Data acquisition system prepared (high-speed oscilloscope, DAQ)
+☐ Pass/fail criteria defined for each test
+☐ Failure analysis plan prepared (for any test failures)
+
+DOCUMENTATION:
+☐ Schematic finalized (PDF + CAD files)
+☐ BOM generated (with part numbers, suppliers, lead times)
+☐ PCB layout files exported (Gerber, drill files)
+☐ Assembly drawings created (component placement, orientation)
+☐ Test plan finalized (this document)
+☐ FMEA completed (RPN calculated for all failure modes)
+☐ Design review meeting scheduled (peer review)
+
+FABRICATION READINESS:
+☐ PCB vendor selected (space-qualified fabrication process)
+☐ Assembly house selected (capable of QML/QMLV component handling)
+☐ Component procurement started (long lead items ordered)
+☐ Tooling prepared (stencils, fixtures)
+☐ Quality control plan established (inspection, X-ray, functional test)
+☐ Schedule prepared (fabrication → assembly → test → qualification)
+
+================================================================================
+END OF DOCUMENT
+================================================================================
+
+Document prepared by: Claude (Anthropic AI Assistant)
+For: Space-Qualified Edge Computer Latchup Protection System
+Application: LEO orbit, 1+ year mission, 10 krad/year TID environment
+Design Philosophy: Hardware-only, interconnected shutdown, 5 retry attempts
+
+NEXT STEPS:
+1. Review this document with system engineer and peer reviewers
+2. Finalize component selection (confirm QML/QMLV availability)
+3. Generate detailed schematics in CAD tool (Altium, OrCAD, KiCAD)
+4. Perform PCB layout following guidelines in Section 6
+5. Order components (start with long-lead items: MOSFETs, QML ICs)
+6. Fabricate PCB and assemble prototype
+7. Execute test plan (Phases 1-6)
+8. Perform radiation testing (heavy ion beam)
+9. Qualify for flight
+
+ESTIMATED TIMELINE:
+- Design review: 2 weeks
+- PCB layout: 4 weeks
+- Fabrication: 4 weeks
+- Assembly: 2 weeks
+- Testing (Phase 1-5): 8 weeks
+- Radiation testing: 2 weeks (plus facility scheduling)
+- Qualification: 4 weeks
+TOTAL: ~6 months (excluding component procurement lead time)
+
+For questions or clarifications, refer to project knowledge base or consult
+with radiation effects specialist.

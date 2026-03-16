@@ -1,0 +1,1607 @@
+================================================================================
+MACROSEL PROTECTION SYSTEM
+VERSION 4.0 – FINAL DESIGN WITH MAJOR ARCHITECTURAL IMPROVEMENTS
+Radiation-Tolerant Latchup Detection and Recovery for LEO Edge Computer
+================================================================================
+
+Document Version:  4.0
+Date:              February 2026
+Application:       ARM Cortex-A72 Edge Computer, LEO orbit, 3-year minimum mission
+Design:            Single master P-channel MOSFET switch, 6-channel current sensing,
+                   wired-AND comparator bus, hardware-only infinite retry with
+                   ~1 second delay between attempts. No supervisory controller.
+
+MAJOR IMPROVEMENTS IN v4.0:
+  ✓ Op-amp upgrade: LMP7704-SP → OPA4H838-SEP (5V supply, zero-drift, superior specs)
+  ✓ Single 5V power domain: All circuits powered from 5V_IN (massive simplification)
+  ✓ Wired-AND comparator bus: Eliminates 2 OR gate ICs, simpler routing
+  ✓ 10ms blanking window: Properly masks inrush current after FET turn-on
+  ✓ Removed PGOOD startup delay: Wasn't solving the right problem
+  ✓ Rail 4 optimized: 100mΩ → 50mΩ shunt (saves 20mV voltage drop budget)
+  ✓ Simplified enable logic: ENABLE = NOT(FAULT_LATCHED) only
+  ✓ Component count reduction: 11 ICs → 9 ICs (~$400 cost savings)
+
+DESIGN PHILOSOPHY:
+  Hardware-only autonomous protection with maximum simplicity and reliability.
+  Every component must justify its existence - eliminate unnecessary complexity.
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+ 1. System Architecture
+ 2. Power Budget and Rail Summary
+ 3. Master Protection Switch
+ 4. Current Sense Circuits – Stage 1: Difference Amplifiers (×6)
+ 5. Current Sense Circuits – Stage 2: Wired-AND Comparator Bus
+ 6. Logic Controller – SR Latch, Blanking Timer, Retry Timer, Enable
+ 7. System Integration and Signal Flow
+ 8. Complete Bill of Materials
+ 9. PCB Layout Guidelines
+10. Assembly Notes
+11. Testing Procedures
+12. Failure Mode Analysis
+13. Resolved Issues from v3.3
+
+================================================================================
+1. SYSTEM ARCHITECTURE
+================================================================================
+
+PROTECTION STRATEGY:
+  One master P-channel MOSFET (high-side, 5V input rail)
+  Six independent current-sensing channels (one per downstream rail)
+  Wired-AND comparator bus (any fault triggers global fault)
+  Hardware-only infinite retry: ~1 second off between attempts
+  10ms blanking window after FET turn-on (masks Buck #1 inrush)
+  SR latch maintains fault state during power loss
+  OBC monitors device health via telemetry (optional failsafe)
+
+SYSTEM BLOCK DIAGRAM:
+
+    5V INPUT (spacecraft bus) ─────────────── 5V_IN (powers ALL circuits)
+         │                                        │
+         │                                        ├─→ ALL PROTECTION CIRCUITS
+         ▼                                        │   (single power domain)
+    ┌────────────────────────────────────┐       │   - Op-amps (OPA4H838-SEP)
+    │  MASTER PROTECTION SWITCH          │       │   - Comparators
+    │                                    │       │   - SR Latch
+    │  Q1: BUP06CP038F-01 (DPAK)        │       │   - Timers (blanking, retry)
+    │  Gate driver: SN54SC6T14-SEP       │       │   - Enable Logic
+    │  Gate pull-up: R1 10kΩ to 5V      │       │   - Gate Driver
+    │  Gate series: R2 100Ω              │       │
+    │  Gate snubber: C2 100nF            │       │
+    └────────┬───────────────────────────┘       │
+             │ 5V Protected Output               │
+             │                                   │
+    ┌────────┴────────────────────────────────┐  │
+    │                                         │  │
+    ▼                                         ▼  │
+Buck #1 (3.3V 10A)                  Buck #2 + PMIC
+    │                                         │
+    ├→ Rail 1: 3.3V / 5A (AI Core 1)         ├→ Rail 3: 1.2V / 3A  (CPU+DDR4)
+    └→ Rail 2: 3.3V / 5A (AI Core 2)         ├→ Rail 4: 1.35V / 0.4A (CPU)
+                                              ├→ Rail 5: 1.8V / 2A  (CPU+eMMC)
+                                              └→ Rail 6: 2.5V / 1A  (CPU+DDR4)
+
+    Each rail passes through 10 mΩ or 50 mΩ shunt resistor
+         │    │    │    │    │    │
+         ▼    ▼    ▼    ▼    ▼    ▼
+    ┌─────────────────────────────────────┐
+    │ STAGE 1: DIFFERENCE AMPLIFIERS      │
+    │ 2× OPA4H838-SEP (CFP-14, quad)      │  ← NEW: Replaces LMP7704-SP
+    │ 5V supply (from 5V_IN)              │  ← CHANGED: Was 3.3V from Buck #1
+    │ 4-resistor difference topology      │
+    │ Gain 13–66× per channel             │
+    │ Output: 0–2.2V (0 = no current)     │
+    │                                     │
+    │ V_AMP_1 through V_AMP_6             │
+    └──────────────┬──────────────────────┘
+                   │
+    ┌──────────────▼──────────────────────┐
+    │ STAGE 2: WIRED-AND COMPARATOR BUS  │  ← NEW ARCHITECTURE
+    │ 2× TLV1704-SEP (TSSOP-14, quad)     │
+    │ 5V supply (from 5V_IN)              │
+    │ V_ref = 0.996V (from 5V divider)    │
+    │ IN+ = V_ref, IN- = V_AMP_n          │
+    │                                     │
+    │ All 6 outputs WIRED TOGETHER        │  ← KEY CHANGE
+    │ Single 10kΩ pull-up to 5V           │
+    │ GLOBAL_FAULT_n (active-LOW)         │
+    │   = HIGH: all rails normal          │
+    │   = LOW:  any rail faulted          │
+    └──────────────┬──────────────────────┘
+                   │
+    ┌──────────────▼──────────────────────┐
+    │ LOGIC CONTROLLER (5V powered)       │
+    │                                     │
+    │  10ms Blanking Timer (after FET ON) │  ← NEW
+    │  Blanking OR gate → SET_L           │
+    │  SR Latch → FAULT_LATCHED           │
+    │  Retry timer ~0.6–1.35s             │
+    │  Enable: NOT(FAULT_LATCHED)         │  ← SIMPLIFIED
+    │  → ENABLE_GLOBAL                    │
+    └──────────────┬──────────────────────┘
+                   │
+                   └→ Gate driver of Q1
+
+RESPONSE TIME (worst case, Rail 6):
+  Difference amplifier:  9.2 µs  (Rail 6, highest gain)
+  Comparator:            0.6 µs  (TLV1704-SEP typical propagation delay)
+  Wired-AND bus:        <0.01 µs (passive wire)
+  Blanking gate:        <0.01 µs (SN54SC propagation)
+  P-FET turn-off:        0.3 µs  (gate RC = 100Ω × 2.5nF)
+  TOTAL:                ~10.1 µs worst case
+
+RESPONSE TIME (fastest, Rail 1 or 2):
+  Difference amplifier:  1.8 µs
+  Rest of chain:         0.9 µs
+  TOTAL:                ~2.7 µs
+
+ADEQUACY: Macro-SEL events develop over 10–1000+ µs before causing
+permanent damage. Both figures are well within the safe response window
+for macro-SEL. Micro-SEL (sub-µs pulse) is not detected, but micro-SEL
+on advanced CMOS nodes is typically self-recovering.
+
+================================================================================
+2. POWER BUDGET AND RAIL SUMMARY
+================================================================================
+
+POWER INPUT:
+  5V @ 5A max from spacecraft bus (25W total system budget)
+
+RAILS MONITORED (6 total):
+
+Rail  Voltage  Current  Load                    Shunt    Trip Threshold
+────────────────────────────────────────────────────────────────────────
+  1    3.3V     5A      AI Core 1               10 mΩ    7.5A (150%)
+  2    3.3V     5A      AI Core 2               10 mΩ    7.5A (150%)
+  3    1.2V     3A      CPU + DDR4 RAM          10 mΩ    4.5A (150%)
+  4    1.35V    0.4A    CPU                     50 mΩ    0.6A (150%)  ← CHANGED
+  5    1.8V     2A      CPU + eMMC              10 mΩ    3.0A (150%)
+  6    2.5V     1A      CPU + DDR4 RAM          10 mΩ    1.5A (150%)
+
+PROTECTION CIRCUIT POWER CONSUMPTION (all from 5V_IN):
+
+  2× OPA4H838-SEP op-amps:  2 × 2.6mA = 5.2mA
+  2× TLV1704-SEP comparators: 2 × 150µA = 0.3mA
+  Logic gates (5 ICs):         5 × 20µA = 0.1mA
+  Q_dis leakage:               <1µA
+  V_ref dividers (5×):         5 × 100µA = 0.5mA
+  Pull-up resistor (wired-AND): 5V/10kΩ = 0.5mA
+  
+  TOTAL (during operation):     ~6.6mA @ 5V = 33mW
+  TOTAL (during retry wait):    ~6.6mA @ 5V = 33mW (no change - always on)
+
+TOTAL PROTECTION OVERHEAD: 33mW continuously (0.13% of 25W system budget)
+
+ADVANTAGE OF SINGLE POWER DOMAIN:
+  - No power cycling of protection circuits
+  - Consistent behavior during faults and recovery
+  - Simpler power distribution on PCB
+  - No Buck #1 dependency for protection operation
+
+================================================================================
+3. MASTER PROTECTION SWITCH
+================================================================================
+
+COMPONENT: Q1 – BUP06CP038F-01
+
+Package:     DPAK (TO-252AA) power package
+Type:        P-channel power MOSFET
+V_DSS:       -55V (comfortably above 5V system)
+I_D:         -35A continuous (7× system max current)
+I_D peak:    -140A pulsed (handles latchup transients)
+R_DS(on):    38 mΩ typ @ Vgs = -4.5V
+             44 mΩ max @ Vgs = -4.5V (125°C)
+
+Radiation tolerance:
+  TID:       30-50 krad(Si) by design (DMOS structure, thick oxide)
+  SEE LET:   46 MeV·cm²/mg (moderate immunity)
+
+POWER DISSIPATION AT RATED LOAD:
+  I = 5A, R_DS(on) = 44 mΩ (worst case, hot)
+  P = I² × R = 5² × 0.044 = 1.1W
+  θ_JA ≈ 50°C/W (minimal heatsinking, TO-252 on 2oz copper)
+  ΔT_J = 1.1W × 50 = 55°C
+  T_J = 25°C (ambient) + 55°C = 80°C (well within 150°C max)
+
+CONNECTIONS:
+
+           5V_IN ──────────┬─── Source (S)
+                           │
+                      [Q1 P-FET]
+                           │
+           5V_OUT ─────────┴─── Drain (D)
+
+  Gate (G) circuit:
+    5V_IN ──[R1: 10kΩ]── GATE ──[R2: 100Ω]── GATE_DRIVE
+                          │
+                        [C2: 100nF to Source]
+
+  R1 (10kΩ pull-up): Ensures P-FET defaults to OFF on power-up or if
+                      gate driver loses power. Gate pulled to Source voltage
+                      → Vgs = 0V → FET OFF (fail-safe).
+
+  R2 (100Ω series):  Gate drive current limiting and dV/dt control.
+                      With C_GS ≈ 2.5nF, τ = 100Ω × 2.5nF = 250ns turn-off.
+
+  C2 (100nF snubber): Reduces gate ringing and dV/dt stress during switching.
+
+GATE DRIVER:
+  U_INV gate #1 (SN54SC6T14-SEP Schmitt inverter)
+  Input:  ENABLE_GLOBAL (from AND gate)
+  Output: GATE_DRIVE
+
+  Logic:
+    ENABLE_GLOBAL = HIGH → GATE_DRIVE = LOW  → Vgs = -5V → FET ON
+    ENABLE_GLOBAL = LOW  → GATE_DRIVE = HIGH → Vgs = ~0V → FET OFF
+
+  SN54SC6T14-SEP at 5V supply:
+    Output LOW:  <0.1V (strong pull to GND)
+    Output HIGH: >4.9V (strong pull to 5V)
+
+  When GATE_DRIVE = LOW:
+    Gate = (5V × 100Ω + 0V × 10kΩ) / (100Ω + 10kΩ) ≈ 0.05V
+    Source = 5V
+    Vgs = 0.05V - 5V = -4.95V → FET fully ON (R_DS = 38mΩ)
+
+  When GATE_DRIVE = HIGH (≈5V):
+    Gate = 5V, Source = 5V
+    Vgs = 0V → FET OFF
+
+TURN-OFF TIME UNDER FAULT:
+  From FAULT detected to 5V_OUT dropping:
+    Comparator:      0.6 µs
+    Wired-AND bus:   0.01 µs
+    Blanking gate:   0.01 µs
+    Latch + logic:   0.01 µs
+    Gate RC rise:    3 × τ = 3 × 250ns = 0.75 µs
+    TOTAL:          ~1.4 µs
+
+  Latchup current × time = 20A × 1.4µs = 28 µA·s
+  This is negligible thermal energy, no damage to FET or load.
+
+================================================================================
+4. CURRENT SENSE CIRCUITS – STAGE 1: DIFFERENCE AMPLIFIERS
+================================================================================
+
+TOPOLOGY: 4-resistor instrumentation difference amplifier
+
+Op-amp IC: OPA4H838-SEP (quad, CFP-14 hermetic flatpack)
+Supply:    5V from 5V_IN (single power domain)
+Quantity:  2 packages (8 op-amps total, 6 used)
+
+OPA4H838-SEP specifications (SUPERIOR to LMP7704-SP):
+  Supply voltage:      2.5V – 5.5V (powered at 5V from 5V_IN)
+  GBW:                 10 MHz (4× higher than LMP7704-SP!)
+  Slew rate:           5 V/µs (5× higher than LMP7704-SP!)
+  Input CM range:      (V-) - 0.1V to (V+) + 0.1V = -0.1V to 5.1V
+  Differential input:  ±0.2V ABSOLUTE MAXIMUM (still need protection resistors)
+  TID:                 30 krad(Si) RLAT (vs 100 krad for LMP7704-SP, acceptable)
+  SEE LET:             43 MeV·cm²/mg (vs 85 for LMP7704-SP, still adequate)
+  Offset voltage:      ±2.25 µV (vs ±500 µV for LMP7704-SP, 200× better!)
+  Offset drift:        ±0.005 µV/°C (zero-drift technology, vs no spec for LMP7704)
+  Input bias current:  ±30 pA (vs ±50 pA for LMP7704-SP, slightly better)
+  Noise:               7 nV/√Hz @ 1kHz (similar to LMP7704-SP)
+
+CRITICAL ADVANTAGE - 5V SUPPLY OPERATION:
+  - No common-mode headroom issues on 3.3V rails
+  - Rail 1/2 (3.3V) sensing has full 1.8V headroom (5.1V max - 3.3V = 1.8V)
+  - Single power domain simplifies design
+  - Op-amps stay powered during shutdown (cleaner signals)
+
+CIRCUIT PER CHANNEL:
+
+    V_RAIL+ (before shunt) ──[R_p: 1kΩ]─┬──[R1: 9.09kΩ]──┬─── V+
+                                         │                 │
+                                         └──[R2: varies]───┤
+                                                           │
+                                                       [OP-AMP]
+                                                           │
+    V_RAIL- (after shunt)  ──[R_p: 1kΩ]─┬──[R3: 9.09kΩ]──│─── V-
+                                         │                 │
+                                         └──[R4: varies]───┴─→ V_AMP_n
+
+  R_p (1kΩ input protection):
+    Limits differential current if op-amp inputs exceed ±0.2V during transients.
+    OPA4H838-SEP has ±0.2V differential limit (vs ±0.3V for LMP7704-SP).
+    
+    Added to BOTH inputs (V+ and V-) so matching is preserved.
+    Effective R1 = R1_resistor + R_p = 9.09kΩ + 1kΩ = 10.09kΩ
+
+  Gain formula:
+    G = R2 / R1_eff = R2 / 10.09kΩ
+    V_AMP = G × (V_RAIL+ - V_RAIL-) = G × V_sense
+
+CHANNEL DESIGN TABLE (RAIL 4 UPDATED):
+
+Rail  I_trip  R_shunt  V_sense  G_ideal  R2 (E96)  G_actual  V_AMP@trip
+────────────────────────────────────────────────────────────────────────
+  1    7.5A    10mΩ     75mV     13.33    133kΩ     13.18      988mV
+  2    7.5A    10mΩ     75mV     13.33    133kΩ     13.18      988mV
+  3    4.5A    10mΩ     45mV     22.22    221kΩ     21.90      985mV
+  4    0.6A    50mΩ     30mV     33.33    332kΩ     32.90      987mV  ← CHANGED
+  5    3.0A    10mΩ     30mV     33.33    332kΩ     32.90      987mV
+  6    1.5A    10mΩ     15mV     66.67    665kΩ     65.89      988mV
+
+RAIL 4 CHANGE JUSTIFICATION:
+  Old design: 100mΩ shunt × 0.4A = 40mV drop (59% of ±67.5mV tolerance budget)
+  New design: 50mΩ shunt × 0.4A = 20mV drop (30% of budget, leaves 47.5mV margin)
+  
+  This saves critical voltage margin for:
+    - PCB trace resistance (~10mV)
+    - Connector drop (~5mV)
+    - VRM ripple and transient tolerance (~32mV remaining)
+
+BANDWIDTH AND RESPONSE TIME (IMPROVED with 10 MHz GBW):
+
+Rail  Gain   BW (10MHz/G)  t_rise (0.35/BW)
+──────────────────────────────────────────────
+  1   13.18    759 kHz        0.46 µs  (was 1.8 µs with LMP7704)
+  2   13.18    759 kHz        0.46 µs
+  3   21.90    457 kHz        0.77 µs  (was 3.1 µs)
+  4   32.90    304 kHz        1.15 µs  (was 2.3 µs)
+  5   32.90    304 kHz        1.15 µs  (was 4.6 µs)
+  6   65.89    152 kHz        2.3 µs   (was 9.2 µs - 4× faster!)
+
+SIGNIFICANT IMPROVEMENT: Worst-case Rail 6 response improved from 9.2µs to 2.3µs
+This provides 4× more margin for macro-SEL protection.
+
+PACKAGE ALLOCATION:
+
+  U_AMP_A (OPA4H838-SEP package #1):
+    Ch A: Rail 1
+    Ch B: Rail 2
+    Ch C: Rail 3
+    Ch D: Rail 4
+
+  U_AMP_B (OPA4H838-SEP package #2):
+    Ch A: Rail 5
+    Ch B: Rail 6
+    Ch C: UNUSED (tie inputs to GND via 10kΩ, leave output no-connect)
+    Ch D: UNUSED (tie inputs to GND via 10kΩ, leave output no-connect)
+
+POWER CONNECTION:
+  Both packages: V+ = 5V from 5V_IN, V- = GND
+  Bypass capacitors: 100nF ceramic from V+ to GND, <5mm from IC pins
+
+IMPORTANT NOTE - OP-AMPS STAY POWERED DURING SHUTDOWN:
+  When P-FET turns OFF and Buck #1 collapses:
+    - Op-amps remain powered from 5V_IN
+    - Rails collapse to 0V
+    - V_sense = 0V - 0V = 0V
+    - V_AMP_n = G × 0V = 0V (clean, defined state)
+    - This feeds comparators which see 0V < 0.996V → FAULT_n stays LOW
+    - SR latch holds FAULT_LATCHED = HIGH independently
+    - System stays off until retry timer completes
+
+================================================================================
+5. CURRENT SENSE CIRCUITS – STAGE 2: WIRED-AND COMPARATOR BUS
+================================================================================
+
+MAJOR ARCHITECTURAL IMPROVEMENT: Wired-AND Configuration
+
+COMPARATOR IC: TLV1704-SEP (quad, TSSOP-14)
+Supply:        5V from 5V_IN (single power domain)
+Quantity:      2 packages (8 comparators, 6 used)
+
+TLV1704-SEP specifications:
+  Supply voltage:      2.2V – 24V (powered at 5V from 5V_IN)
+  Input CM range:      Rail-to-rail (0V to VCC)
+  Propagation delay:   560 ns typical, 1.5 µs max
+  Input offset:        ±300 µV typ, ±2 mV max
+  Output type:         Open drain (KEY for wired-AND operation)
+  TID:                 30 krad(Si) RLAT
+  SEE LET:             43 MeV·cm²/mg
+
+WIRING PER CHANNEL:
+
+               V_ref (0.996V) ────────────┬──→ IN+ (non-inverting)
+                                          │
+    V_AMP_n (from op-amp) ────────────────┴──→ IN- (inverting)
+                                          
+                                      COMPARATOR
+                                          │
+                                         OUT (open drain)
+                                          │
+                                          └──→ GLOBAL_FAULT_n BUS
+
+WIRED-AND BUS TOPOLOGY:
+
+    All 6 comparator outputs connected to single wire
+                     │
+              [R_pull: 10kΩ to 5V]
+                     │
+              GLOBAL_FAULT_n (active-LOW global fault signal)
+
+HOW WIRED-AND WORKS:
+
+  Open-drain outputs can be tied together because:
+    - When output is Hi-Z (inactive), it doesn't drive the bus
+    - When output is LOW (active), it pulls the entire bus to GND
+    - Multiple LOW outputs simply share the current sink
+  
+  This creates an inherent AND function:
+    - ALL comparators Hi-Z → bus pulled HIGH by R_pull
+    - ANY comparator LOW → bus pulled LOW
+    - In positive logic: FAULT = COMP1 OR COMP2 OR ... OR COMP6
+    - In negative logic: FAULT_n = COMP1_n AND COMP2_n AND ... AND COMP6_n
+
+LOGIC STATES:
+
+  Normal operation (all rails below trip point):
+    V_AMP_n < V_ref (e.g., 660mV < 996mV)
+    IN+ > IN- 
+    Comparator output = Hi-Z (not driving)
+    All 6 comparators Hi-Z
+    R_pull (10kΩ) pulls GLOBAL_FAULT_n to 5V
+    GLOBAL_FAULT_n = HIGH (no fault)
+
+  Fault on any rail (e.g., Rail 3 overcurrent):
+    V_AMP_3 > V_ref (e.g., 2.19V > 996mV)
+    IN+ < IN-
+    Comparator 3 output drives LOW (pulls to GND)
+    GLOBAL_FAULT_n pulled to 0V (regardless of other comparators)
+    GLOBAL_FAULT_n = LOW (fault detected)
+
+  During shutdown (Buck #1 collapsed, all rails at 0V):
+    All V_AMP_n = 0V (op-amps still powered, sensing 0V)
+    0V < 996mV → IN+ > IN- for all comparators
+    All comparators Hi-Z
+    GLOBAL_FAULT_n = HIGH (false "no fault" state)
+    BUT: SR latch already SET (FAULT_LATCHED = HIGH)
+    System stays off via latch, not GLOBAL_FAULT_n
+
+COMPONENT ELIMINATION:
+
+  This architecture removes from v3.3 design:
+    ❌ U_OR_A (SN54SC4T32-SEP quad OR, $200)
+    ❌ U_OR_B (SN54SC4T32-SEP quad OR, $200)
+    ❌ Inverter gate #2 (was inverting GLOBAL_FAULT for latch SET input)
+    ❌ 5 intermediate signal traces (F12, F34, F56, F1234, etc.)
+  
+  Total savings: 2 ICs, ~$400, simplified PCB routing, fewer potential failure points
+
+V_REF GENERATION (POWERED FROM 5V_IN):
+
+Target: ~1.0V (matches V_AMP at trip point)
+Supply: 5V from 5V_IN (stays stable even when Buck #1 dies)
+
+  5V ──[R_top: 40.2kΩ]── V_ref ──[R_bot: 10.0kΩ]── GND
+
+Calculation:
+  V_ref = R_bot / (R_top + R_bot) × 5V
+        = 10.0 / (40.2 + 10.0) × 5
+        = 10.0 / 50.2 × 5
+        = 0.996V (within 0.4% of 1.0V target)
+
+Using E96 0.1% resistors:
+  R_top = 40.2kΩ (E96)
+  R_bot = 10.0kΩ (E96)
+
+GROUPING (minimize divider count):
+  Group A: Rails 1 & 2 share one V_ref divider (identical trip voltage)
+  Groups B-E: Rails 3, 4, 5, 6 each individual divider (same values)
+  
+  Total: 5 divider circuits × 2 resistors = 10 resistors
+
+DECOUPLING:
+  One 100nF ceramic (X7R, 0805) capacitor from each V_ref node to GND.
+  Placed <2mm from comparator IN+ pin.
+  Prevents comparator switching noise from modulating reference voltage.
+
+PULL-UP RESISTOR:
+  R_pull = 10kΩ (0805, 1%, standard) to 5V
+  ONE resistor for entire wired-AND bus
+  
+  Current when any fault active: 5V / 10kΩ = 0.5mA (negligible)
+
+PACKAGE ALLOCATION:
+
+  U_CMP_A (TLV1704-SEP package #1):
+    Comp 1: Rail 1 → OUT tied to GLOBAL_FAULT_n bus
+    Comp 2: Rail 2 → OUT tied to GLOBAL_FAULT_n bus
+    Comp 3: Rail 3 → OUT tied to GLOBAL_FAULT_n bus
+    Comp 4: Rail 4 → OUT tied to GLOBAL_FAULT_n bus
+
+  U_CMP_B (TLV1704-SEP package #2):
+    Comp 1: Rail 5 → OUT tied to GLOBAL_FAULT_n bus
+    Comp 2: Rail 6 → OUT tied to GLOBAL_FAULT_n bus
+    Comp 3: UNUSED (tie IN+ to GND, IN- to GND, leave OUT no-connect)
+    Comp 4: UNUSED (tie IN+ to GND, IN- to GND, leave OUT no-connect)
+
+POWER CONNECTION:
+  Both packages: VCC = 5V from 5V_IN, GND = GND
+  Bypass: 100nF ceramic <5mm from VCC pin
+
+PCB ROUTING - WIRED-AND BUS:
+  - Route all 6 comparator outputs to a single trace
+  - Keep trace short (<50mm total length)
+  - Place 10kΩ pull-up resistor at electrical midpoint of trace
+  - Minimize stubs from each comparator output to main bus trace
+  - No special impedance control needed (slow logic speeds)
+
+================================================================================
+6. LOGIC CONTROLLER
+================================================================================
+
+All logic ICs powered from 5V (5V_IN, single power domain).
+All SN54SC family: TSSOP-14 package, 30 krad TID, 1.2V-5.5V operation.
+
+────────────────────────────────────────────────────────────────────────
+SECTION A: SR LATCH (FAULT STATE MEMORY)
+────────────────────────────────────────────────────────────────────────
+
+IC: U_LATCH – SN54SC4T00-SEP (quad 2-input NAND)
+Quantity: 1 package (2 gates used for latch, 2 spare)
+
+Purpose: Remember that a fault occurred, even after Buck #1 collapses and
+         GLOBAL_FAULT_n goes HIGH (false "no fault"). Hold system off until
+         retry timer explicitly resets the latch.
+
+CIRCUIT (classic cross-coupled NAND SR latch):
+
+            ┌──────┐
+  SET_L ────┤      │
+            │ NAND ├────┬──→ Q (FAULT_LATCHED)
+      ┌────┤      │    │
+      │    └──────┘    │
+      │                │
+      │    ┌──────┐    │
+      └────┤      │    │
+           │ NAND ├────┘
+  RESET_L ─┤      │
+           └──────┘
+
+Using NAND gates from U_LATCH (SN54SC4T00-SEP):
+  Gate 1: NAND(SET_L, Q')    → Q
+  Gate 2: NAND(RESET_L, Q)   → Q'
+  Gates 3-4: UNUSED (tie both inputs to 5V)
+
+Where:
+  Q  = FAULT_LATCHED (output we use)
+  Q' = complement (not used directly)
+
+INPUTS (both active-LOW):
+  SET_L   = output from blanking OR gate (see Section B)
+  RESET_L = NOT(RETRY_PULSE) from retry timer (see Section C)
+
+OPERATION:
+
+State 1 – Normal operation:
+  GLOBAL_FAULT_n = HIGH (no faults)
+  BLANKING = LOW (not in blanking window)
+  SET_L = HIGH OR LOW = HIGH (inactive, see Section B)
+  Latch not triggered
+  FAULT_LATCHED = LOW
+
+State 2 – Fault detected (after blanking):
+  GLOBAL_FAULT_n goes LOW (fault on any rail)
+  BLANKING = LOW (blanking window over)
+  SET_L = LOW OR LOW = LOW (active)
+  Latch SETS
+  FAULT_LATCHED = HIGH (and STAYS HIGH even when GLOBAL_FAULT_n changes)
+
+State 3 – Buck #1 collapses:
+  GLOBAL_FAULT_n goes HIGH (false "no fault" because all V_AMP → 0V)
+  BLANKING = LOW
+  SET_L = HIGH OR LOW = HIGH (inactive)
+  Latch HOLDS previous state
+  FAULT_LATCHED = HIGH (still remembering fault)
+
+State 4 – Retry timer completes:
+  RETRY_PULSE goes HIGH briefly (~10ms)
+  RESET_L goes LOW (inverted from RETRY_PULSE)
+  Latch RESETS
+  FAULT_LATCHED = LOW
+  System can now restart
+
+────────────────────────────────────────────────────────────────────────
+SECTION B: 10ms BLANKING WINDOW (INRUSH MASKING)
+────────────────────────────────────────────────────────────────────────
+
+PURPOSE: Mask fault detection for 10ms after P-FET turns ON to allow Buck #1
+         inrush current to settle. This is the CRITICAL fix missing from v3.3.
+
+THE PROBLEM IT SOLVES:
+  When P-FET turns ON:
+    1. Buck #1 input capacitors (typically 100µF) begin charging
+    2. Inrush current can reach 10-50A for 1-5ms
+    3. This exceeds all trip thresholds (150% of rated currents)
+    4. Without blanking, system immediately trips and shuts back off
+    5. Result: Stuck in rapid ON/OFF cycle, never achieving stable operation
+
+BLANKING TIMER CIRCUIT:
+
+  IC: U_SCH gate #1 (SN54SC6T17-SEP Schmitt trigger buffer)
+  Power: 5V from 5V_IN
+
+  Trigger: ENABLE_GLOBAL rising edge (FET turning ON)
+  
+  Circuit topology:
+  
+    ENABLE_GLOBAL ──[C_blank: 10nF]── BLANK_NODE ──[R_blank: 1MΩ to GND]
+                                          │
+                                          └──→ Schmitt buffer input
+                                               
+                                               Schmitt output → BLANKING
+
+  How it works:
+    
+    When ENABLE_GLOBAL goes LOW→HIGH (FET turns ON):
+      - Capacitor couples rising edge to BLANK_NODE
+      - BLANK_NODE spikes high (above VT+)
+      - Schmitt output BLANKING = HIGH
+      - Over next 10ms, C_blank discharges through R_blank
+      - When BLANK_NODE drops below VT-, BLANKING goes LOW
+      - Blanking window over, fault detection active
+    
+    When ENABLE_GLOBAL goes HIGH→LOW (FET turns OFF):
+      - Negative edge, but BLANK_NODE already near 0V
+      - No effect on blanking state
+
+TIMING CALCULATION:
+
+  RC = 1.0MΩ × 10nF = 10ms (time constant)
+  
+  Discharge from initial spike to VT- (negative-going threshold):
+    t = RC × ln(V_initial / VT-)
+  
+  SN54SC6T17-SEP at VCC = 5V:
+    VT+ (positive): min 1.43V, typ 2.00V, max 2.71V
+    VT- (negative): min 0.74V, typ 1.06V, max 1.35V
+  
+  Assuming V_initial ≈ 3.5V (edge-coupled spike, not full 5V):
+    Min blanking (VT- = 1.35V): t = 10ms × ln(3.5/1.35) = 10ms × 0.954 = 9.5ms
+    Typ blanking (VT- = 1.06V): t = 10ms × ln(3.5/1.06) = 10ms × 1.193 = 11.9ms
+    Max blanking (VT- = 0.74V): t = 10ms × ln(3.5/0.74) = 10ms × 1.554 = 15.5ms
+  
+  Range: ~9.5ms to 15.5ms (target was 10ms, this is acceptable)
+
+BLANKING INTEGRATION WITH LATCH:
+
+  IC: U_OR (SN54SC4T32-SEP dual 2-input OR)
+  Use Gate 1 only:
+  
+    Input A: GLOBAL_FAULT_n (active-LOW from wired-AND bus)
+    Input B: BLANKING (active-HIGH from Schmitt trigger)
+    Output:  SET_L (active-LOW to SR latch)
+  
+  Truth table:
+    GLOBAL_FAULT_n | BLANKING | SET_L | Meaning
+    ──────────────────────────────────────────────
+         HIGH      |   HIGH   | HIGH  | Startup/blanking: faults ignored
+         HIGH      |   LOW    | HIGH  | Normal: no fault detected
+         LOW       |   HIGH   | HIGH  | Blanking: fault ignored
+         LOW       |   LOW    | LOW   | Fault detected, trigger latch!
+  
+  This is exactly the behavior we need:
+    - During 10ms blanking window: SET_L forced HIGH (inactive)
+    - After blanking, fault on any rail: SET_L goes LOW (triggers latch)
+
+CRITICAL TIMING:
+
+  Power-on sequence:
+    T=0:     5V_IN applied
+    T=0:     ENABLE_GLOBAL = LOW (latch not yet reset)
+    T=1s:    Retry timer completes (first attempt)
+    T=1.001s: FAULT_LATCHED reset to LOW
+    T=1.001s: ENABLE_GLOBAL goes HIGH (FET turns ON)
+    T=1.001s: BLANKING goes HIGH (10ms window starts)
+    T=1.005s: Buck #1 inrush occurs (5A spike on Rails 1-2)
+    T=1.005s: Comparators see overcurrent, GLOBAL_FAULT_n = LOW
+    T=1.005s: BUT SET_L = LOW OR HIGH = HIGH (blanking active, fault ignored!)
+    T=1.012s: BLANKING goes LOW (window over)
+    T=1.012s: If fault cleared: system runs normally
+    T=1.012s: If fault persists: SET_L = LOW, latch triggers, shutdown
+
+────────────────────────────────────────────────────────────────────────
+SECTION C: RETRY TIMER (~0.7-1.7 second)
+────────────────────────────────────────────────────────────────────────
+
+IC: U_SCH gate #2 (SN54SC6T17-SEP Schmitt trigger buffer, same IC as blanking)
+Power: 5V from 5V_IN
+
+Purpose: After fault shutdown, hold system off for ~1 second to allow:
+  - Latchup current to fully dissipate
+  - PMIC and buck converter capacitors to discharge
+  - Component temperatures to stabilize
+
+CIRCUIT:
+
+  5V ──[R_timer: 1.0MΩ]── TIMING_B ──[C_timer: 2.2µF]── GND
+                             │
+                             └──→ Schmitt buffer input
+                                  
+                                  Schmitt buffer output → RETRY_ACTIVE
+
+  Discharge transistor:
+    Q_dis: JANTXV2N2222A NPN (SOT-23 or TO-18)
+      Collector → TIMING_B
+      Emitter   → GND
+      Base      → [R_base: 10kΩ] ← from inverted FAULT_LATCHED
+
+CONTROL LOGIC:
+    
+  When FAULT_LATCHED = LOW (no fault):
+    Inverter output = HIGH
+    Q_dis base = HIGH → Q_dis ON
+    TIMING_B shorted to GND = 0V
+    Schmitt input < VT- → RETRY_ACTIVE = LOW
+    
+  When FAULT_LATCHED = HIGH (fault remembered):
+    Inverter output = LOW
+    Q_dis base = LOW → Q_dis OFF
+    C_timer charges through R_timer
+    TIMING_B rises 0V → VT+ over 0.7-1.7s
+    When crosses VT+ → RETRY_ACTIVE = HIGH
+
+TIMING CALCULATION:
+  RC = 1.0MΩ × 2.2µF = 2.2 seconds (time constant)
+  
+  t = RC × ln(VCC / (VCC - VT+))
+  
+  At VCC = 5V, using SN54SC6T17-SEP thresholds:
+    Min (VT+ = 1.43V): t = 2.2 × ln(5/(5-1.43)) = 2.2 × 0.326 = 0.72s
+    Typ (VT+ = 2.00V): t = 2.2 × ln(5/(5-2.00)) = 2.2 × 0.511 = 1.12s
+    Max (VT+ = 2.71V): t = 2.2 × ln(5/(5-2.71)) = 2.2 × 0.781 = 1.72s
+
+Range: ~0.7-1.7 seconds
+
+This variation is acceptable – any delay >0.5s gives adequate settling time.
+
+RETRY_PULSE GENERATION:
+  We need a brief pulse when RETRY_ACTIVE goes HIGH to reset the SR latch.
+  
+  Simple RC differentiator:
+    RETRY_ACTIVE ──[C_pulse: 10nF]── RETRY_PULSE ──[R_pull: 100kΩ to GND]
+  
+  When RETRY_ACTIVE rises: C couples the edge → brief positive pulse (~5ms)
+  When RETRY_ACTIVE falls: negative pulse (doesn't affect latch reset)
+  
+  RETRY_PULSE width ≈ 5 × R × C = 5 × 100kΩ × 10nF = 5ms
+  
+  This pulse inverted by U_INV gate #3: RETRY_PULSE → RESET_L (active-LOW)
+
+────────────────────────────────────────────────────────────────────────
+SECTION D: ENABLE LOGIC (MASSIVELY SIMPLIFIED FROM v3.3)
+────────────────────────────────────────────────────────────────────────
+
+REMOVED: PGOOD_DELAYED signal (was addressing wrong problem)
+REMOVED: Startup delay timer circuit
+REMOVED: Complex 3-input AND gate
+
+NEW SIMPLE LOGIC:
+  ENABLE_GLOBAL = NOT(FAULT_LATCHED)
+
+That's it. One inverter gate.
+
+  IC: U_INV gate #4 (SN54SC6T14-SEP Schmitt inverter)
+  
+    Input:  FAULT_LATCHED (from SR latch Q output)
+    Output: ENABLE_GLOBAL
+  
+  Logic:
+    FAULT_LATCHED = LOW  → ENABLE_GLOBAL = HIGH → FET ON
+    FAULT_LATCHED = HIGH → ENABLE_GLOBAL = LOW  → FET OFF
+
+LOGIC TABLE:
+
+FAULT_LATCHED  ENABLE_GLOBAL  Gate Driver  P-FET  State
+─────────────────────────────────────────────────────────
+    LOW             HIGH          LOW        ON    Normal operation
+    HIGH            LOW           HIGH       OFF   Fault/retry wait
+
+WHY THIS WORKS:
+
+  The blanking window already prevents false trips during startup.
+  We don't need a separate startup delay - the first retry timer (~1s)
+  IS the startup delay on initial power-up.
+  
+  Sequence on power-up:
+    1. 5V_IN applied
+    2. All circuits power up
+    3. FAULT_LATCHED = LOW initially (latch power-on state)
+    4. ENABLE_GLOBAL = HIGH
+    5. FET turns ON
+    6. Blanking window starts (10ms)
+    7. Buck #1 inrush masked
+    8. After 10ms, if all rails stable: normal operation
+    9. If any rail faults: latch sets, system shuts off, retry in ~1s
+
+────────────────────────────────────────────────────────────────────────
+INVERTER ALLOCATION SUMMARY (U_INV – SN54SC6T14-SEP)
+────────────────────────────────────────────────────────────────────────
+
+U_INV has 6 inverter gates. Usage:
+
+  Gate #1: ENABLE_GLOBAL       → GATE_DRIVE (P-FET driver)
+  Gate #2: FAULT_LATCHED       → controls Q_dis base (timer discharge)
+  Gate #3: RETRY_PULSE         → RESET_L (SR latch RESET input)
+  Gate #4: FAULT_LATCHED       → ENABLE_GLOBAL
+  Gates #5-6: UNUSED (tie inputs to GND)
+
+Note: Gates #2 and #4 have same input (FAULT_LATCHED) but serve different
+      purposes. This is intentional.
+
+────────────────────────────────────────────────────────────────────────
+SCHMITT BUFFER ALLOCATION SUMMARY (U_SCH – SN54SC6T17-SEP)
+────────────────────────────────────────────────────────────────────────
+
+U_SCH has 6 Schmitt buffer gates. Usage:
+
+  Gate #1: BLANK_NODE → BLANKING (10ms blanking timer)
+  Gate #2: TIMING_B → RETRY_ACTIVE (retry timer)
+  Gates #3-6: UNUSED (tie all inputs to GND)
+
+================================================================================
+7. SYSTEM INTEGRATION AND SIGNAL FLOW
+================================================================================
+
+COMPLETE FAULT DETECTION AND RECOVERY SEQUENCE:
+
+────────────────────────────────────────────────────────────────────────
+PHASE 1: INITIAL POWER-ON
+────────────────────────────────────────────────────────────────────────
+
+T = 0: Power applied to 5V_IN
+
+  All circuits powered instantly (single 5V domain):
+    - Op-amps: OPA4H838-SEP powered, outputs at 0V (no rails yet)
+    - Comparators: TLV1704-SEP powered
+    - Logic: All gates powered
+    - SR latch: Powers up in undefined state (typically Q = LOW)
+    
+  Assume latch powers up with FAULT_LATCHED = LOW (most likely):
+    - ENABLE_GLOBAL = NOT(LOW) = HIGH
+    - Gate driver: ENABLE_GLOBAL = HIGH → GATE_DRIVE = LOW
+    - P-FET: Vgs = -5V → FET ON
+    
+  FET turns ON:
+    - 5V_OUT appears
+    - ENABLE_GLOBAL rising edge triggers blanking timer
+    - BLANKING goes HIGH (10ms window starts)
+    
+  Buck converters start:
+    - Buck #1 and Buck #2 begin startup
+    - Input capacitors charge → inrush current 10-50A for ~5ms
+    - Rails 1-2 (3.3V, 5A each) see inrush
+    
+  Comparators see inrush:
+    - V_AMP_1, V_AMP_2 spike above 1.0V (overcurrent)
+    - Comparators detect fault → GLOBAL_FAULT_n = LOW
+    - BUT: SET_L = GLOBAL_FAULT_n OR BLANKING = LOW OR HIGH = HIGH
+    - Latch NOT triggered (blanking masks fault)
+    
+  After 10-15ms:
+    - Blanking window expires → BLANKING = LOW
+    - Buck converters settled, inrush over
+    - All rail currents normal
+    - V_AMP_n < V_ref → GLOBAL_FAULT_n = HIGH
+    - SET_L = HIGH OR LOW = HIGH (stable)
+    - System runs normally
+
+ALTERNATIVE: If latch powers up with FAULT_LATCHED = HIGH:
+  - ENABLE_GLOBAL = NOT(HIGH) = LOW
+  - FET stays OFF
+  - Q_dis OFF (inverted FAULT_LATCHED = HIGH → base LOW)
+  - Retry timer charges
+  - After ~1s, RETRY_PULSE resets latch
+  - FAULT_LATCHED = LOW
+  - Then same sequence as above
+
+────────────────────────────────────────────────────────────────────────
+PHASE 2: NORMAL OPERATION
+────────────────────────────────────────────────────────────────────────
+
+Power state:
+  - 5V_IN present from spacecraft
+  - P-FET ON (ENABLE_GLOBAL = HIGH)
+  - All 6 rails operating normally
+  - All protection circuits powered
+
+Signal states:
+  1. Current draw normal on all rails (≤100% rated)
+  2. V_AMP_1 through V_AMP_6: all <0.996V (e.g., ~660mV at 100% load)
+  3. Comparators: V_ref (996mV) > V_AMP → IN+ > IN- → all outputs Hi-Z
+  4. Wired-AND bus: all Hi-Z → R_pull → GLOBAL_FAULT_n = HIGH
+  5. Blanking: BLANKING = LOW (window long expired)
+  6. OR gate: SET_L = HIGH OR LOW = HIGH (inactive)
+  7. SR latch: SET_L = HIGH → not triggered, FAULT_LATCHED = LOW
+  8. Q_dis: inverted FAULT_LATCHED = LOW → base HIGH → Q_dis ON
+  9. Q_dis ON → TIMING_B = 0V → RETRY_ACTIVE = LOW
+  10. Enable: ENABLE_GLOBAL = NOT(FAULT_LATCHED) = NOT(LOW) = HIGH
+  11. Gate driver: ENABLE_GLOBAL = HIGH → GATE_DRIVE = LOW → P-FET ON ✓
+
+────────────────────────────────────────────────────────────────────────
+PHASE 3: LATCHUP EVENT
+────────────────────────────────────────────────────────────────────────
+
+T = 0µs: Cosmic ray strikes CPU, triggering latchup on 1.2V rail (Rail 3)
+
+T = 0-5µs: Latchup current builds up
+  - Rail 3 current: 2A → 5A → 10A
+  - V_sense_3 = 10A × 10mΩ = 100mV
+  - V_AMP_3 = 21.9 × 100mV = 2.19V
+
+T = 5µs: Comparator detects fault
+  - V_AMP_3 (2.19V) > V_ref (0.996V)
+  - Comparator 3: IN+ < IN- → output drives LOW
+  - GLOBAL_FAULT_n pulled LOW by Comparator 3
+  - (Other 5 comparators still Hi-Z, don't interfere)
+
+T = 5.01µs: Logic propagation
+  - Blanking: BLANKING = LOW (not in blanking window)
+  - OR gate: SET_L = GLOBAL_FAULT_n OR BLANKING = LOW OR LOW = LOW
+  - SR latch: SET_L goes LOW → latch SETS
+  - FAULT_LATCHED goes HIGH
+  - Inverter: FAULT_LATCHED = HIGH → Q_dis base = LOW
+  - Q_dis turns OFF → TIMING_B can now charge
+  - Inverter: FAULT_LATCHED = HIGH → ENABLE_GLOBAL = LOW
+
+T = 5.02µs: P-FET shutdown begins
+  - Gate driver: ENABLE_GLOBAL = LOW → GATE_DRIVE = HIGH
+  - P-FET gate pulled toward Source → Vgs rises toward 0V
+  - Drain current begins to decrease
+
+T = 6µs: P-FET fully off
+  - Vgs = 0V → FET in cutoff
+  - 5V_OUT collapses
+
+T = 6-10ms: Power rails collapse
+  - Buck #1 input gone → 3.3V output drops to 0V
+  - All 6 downstream rails → 0V
+  - Latchup current ceases (no power to sustain it)
+  - Load components enter safe unpowered state
+
+T = 10ms: Rails at 0V, op-amps still sensing
+  - Op-amps still powered from 5V_IN (single power domain)
+  - V_sense = 0V - 0V = 0V (all rails)
+  - V_AMP_n = G × 0V = 0V (all channels)
+  - Comparators: 0V < 996mV → IN+ > IN- → all outputs Hi-Z
+  - GLOBAL_FAULT_n = HIGH (false "no fault" state)
+  
+  **CRITICAL:** Without SR latch, system would think fault cleared and restart!
+  
+  **With SR latch:**
+  - SET_L = GLOBAL_FAULT_n OR BLANKING = HIGH OR LOW = HIGH (inactive)
+  - But latch HOLDS state: FAULT_LATCHED = HIGH (remembering fault)
+  - ENABLE_GLOBAL = NOT(HIGH) = LOW
+  - System stays OFF ✓
+
+────────────────────────────────────────────────────────────────────────
+PHASE 4: RETRY TIMER RUNNING
+────────────────────────────────────────────────────────────────────────
+
+T = 10ms - 1.5s: Waiting period
+  - All circuits stay powered from 5V_IN
+  - FAULT_LATCHED = HIGH (latch holding fault memory)
+  - Q_dis OFF → TIMING_B capacitor charging: 0V → VT+ (1.43-2.71V)
+  - Charge time: 0.7-1.7 seconds
+  - ENABLE_GLOBAL = LOW (system stays off)
+  - P-FET OFF
+  - All rails remain at 0V
+  - Components cool down, latchup fully extinguished
+
+T = 1.2s (example, typ): Timer threshold reached
+  - TIMING_B crosses VT+ (typ 2.0V)
+  - Schmitt buffer: input > VT+ → RETRY_ACTIVE = HIGH
+
+T = 1.201s: RETRY_ACTIVE rising edge
+  - RC differentiator: rising edge → RETRY_PULSE positive spike (~5ms wide)
+  - Inverter: RETRY_PULSE = HIGH → RESET_L = LOW
+  - SR latch: RESET_L = LOW → latch RESETS
+  - FAULT_LATCHED goes LOW
+  - Inverter: FAULT_LATCHED = LOW → Q_dis base = HIGH
+  - Q_dis turns ON → TIMING_B discharged to 0V
+  - RETRY_ACTIVE returns LOW (cap discharged below VT-)
+
+────────────────────────────────────────────────────────────────────────
+PHASE 5: RESTART ATTEMPT
+────────────────────────────────────────────────────────────────────────
+
+T = 1.201s: Enable logic updates
+  - FAULT_LATCHED = LOW → ENABLE_GLOBAL = NOT(LOW) = HIGH
+
+T = 1.202s: P-FET turns on
+  - Gate driver: ENABLE_GLOBAL = HIGH → GATE_DRIVE = LOW
+  - P-FET gate pulled to 0V → Vgs = -5V → FET ON
+  - 5V_OUT appears
+  - ENABLE_GLOBAL rising edge triggers blanking timer
+  - BLANKING goes HIGH (10ms window starts again)
+
+T = 1.203s: Buck converters start
+  - Buck #1 and Buck #2 see 5V input → begin startup
+  - Inrush current occurs again (~5ms duration)
+  - Comparators may see overcurrent
+  - BUT: BLANKING = HIGH → SET_L forced HIGH → latch not triggered
+  - Inrush masked ✓
+
+T = 1.215s: Blanking expires
+  - BLANKING goes LOW
+  - Now fault detection active
+
+**IF FAULT CLEARED (latchup was transient):**
+  - All rails draw normal current
+  - V_AMP_n < V_ref → GLOBAL_FAULT_n = HIGH
+  - SET_L = HIGH OR LOW = HIGH (stable)
+  - FAULT_LATCHED stays LOW
+  - System runs normally ✓✓✓
+
+**IF FAULT PERSISTS (component permanently damaged):**
+  - Rail 3 immediately latches again
+  - V_AMP_3 > V_ref → GLOBAL_FAULT_n = LOW
+  - SET_L = LOW OR LOW = LOW
+  - SR latch SETS → FAULT_LATCHED = HIGH
+  - ENABLE_GLOBAL = LOW
+  - P-FET OFF
+  - Cycle repeats (infinite autonomous retry)
+
+────────────────────────────────────────────────────────────────────────
+PHASE 6: INFINITE RETRY LOOP (if fault persists)
+────────────────────────────────────────────────────────────────────────
+
+The system will cycle:
+  OFF 0.7-1.7s → ON attempt with 10ms blanking → fault re-detected → OFF again
+
+This continues indefinitely as long as 5V_IN is present.
+
+OBC (spacecraft on-board computer) should monitor device telemetry:
+  - If no telemetry for >10 seconds → stuck in retry loop
+  - OBC can choose to:
+    a) Remove 5V_IN completely (give up on this device)
+    b) Switch to redundant backup device
+    c) Wait for ground command
+
+The hardware protection ensures:
+  - No thermal damage to components (fast shutdown)
+  - No permanent latch condition in protection circuit itself
+  - Automatic recovery if fault clears (e.g., soft error, not hard failure)
+
+================================================================================
+8. COMPLETE BILL OF MATERIALS
+================================================================================
+
+────────────────────────────────────────────────────────────────────────
+ACTIVE SEMICONDUCTORS
+────────────────────────────────────────────────────────────────────────
+
+Ref       Part Number         Function                  Pkg       TID    Qty
+──────────────────────────────────────────────────────────────────────────────
+Q1        BUP06CP038F-01      Master P-FET switch       DPAK      30-50k  1
+U_AMP_A   OPA4H838-SEP        Quad op-amp (ch 1-4)      CFP-14    30k     1
+U_AMP_B   OPA4H838-SEP        Quad op-amp (ch 5-6)      CFP-14    30k     1
+U_CMP_A   TLV1704-SEP         Quad comparator (1-4)     TSSOP-14  30k     1
+U_CMP_B   TLV1704-SEP         Quad comparator (5-6)     TSSOP-14  30k     1
+U_LATCH   SN54SC4T00-SEP      Quad 2-in NAND (latch)    TSSOP-14  30k     1
+U_OR      SN54SC4T32-SEP      Quad 2-in OR (blanking)   TSSOP-14  30k     1
+U_SCH     SN54SC6T17-SEP      Hex Schmitt buffer        TSSOP-14  30k     1
+U_INV     SN54SC6T14-SEP      Hex Schmitt inverter      TSSOP-14  30k     1
+Q_dis     JANTXV2N2222A       Timer discharge NPN       TO-18     50k+    1
+
+TOTAL ACTIVE ICs: 9 (was 12 in v3.3, savings: 3 ICs)
+
+Component changes from v3.3:
+  ✓ ADDED: OPA4H838-SEP (×2) replacing LMP7704-SP (×2)
+  ❌ REMOVED: U_OR_A (SN54SC4T32-SEP) - wired-AND eliminates need
+  ❌ REMOVED: U_OR_B (SN54SC4T32-SEP) - wired-AND eliminates need
+  ❌ REMOVED: Q_start (MMBT2222A) - no startup delay circuit
+  ✓ KEPT: U_OR (SN54SC4T32-SEP) - now used for blanking gate
+
+Estimated cost (space-grade parts):
+  BUP06CP038F-01:      ~$800
+  OPA4H838-SEP (×2):   ~$1000 each = $2000 (vs LMP7704-SP $1200 each = $2400)
+  TLV1704-SEP (×2):    ~$180 each = $360
+  SN54SC series (×4):  ~$200 each = $800 (was 6 ICs = $1200)
+  JANTXV2N2222A:       ~$15
+  
+  TOTAL ACTIVE:        ~$3,975 (was ~$4,775 in v3.3, SAVINGS: $800)
+
+────────────────────────────────────────────────────────────────────────
+CURRENT SENSE SHUNT RESISTORS
+────────────────────────────────────────────────────────────────────────
+
+Ref    Part Number         Value   Power   Tol    Qty   Cost ea.  Subtotal
+────────────────────────────────────────────────────────────────────────────
+R_S1   WSL2512R0100FEA     10 mΩ   2W      1%      1     $3.50     $3.50
+R_S2   WSL2512R0100FEA     10 mΩ   2W      1%      1     $3.50     $3.50
+R_S3   WSL2512R0100FEA     10 mΩ   1W      1%      1     $2.80     $2.80
+R_S4   WSL2512R0500FEA     50 mΩ   1W      1%      1     $2.80     $2.80  ← CHANGED
+R_S5   WSL2512R0100FEA     10 mΩ   1W      1%      1     $2.80     $2.80
+R_S6   WSL2512R0100FEA     10 mΩ   1W      1%      1     $2.80     $2.80
+                                                        TOTAL:    $18.20
+
+────────────────────────────────────────────────────────────────────────
+PRECISION RESISTORS (E96, 0.1% tolerance, 0805 SMD)
+────────────────────────────────────────────────────────────────────────
+
+Value      Function                           Qty   Cost ea.  Subtotal
+────────────────────────────────────────────────────────────────────────
+1.0 kΩ     Input protection (R_p, all ch)     12    $0.80     $9.60
+9.09 kΩ    Diff amp R1/R3 (all channels)      12    $0.80     $9.60
+133 kΩ     Diff amp R2/R4 (Rails 1-2)          4    $0.80     $3.20
+221 kΩ     Diff amp R2/R4 (Rail 3)             2    $0.80     $1.60
+332 kΩ     Diff amp R2/R4 (Rails 4-5)          4    $0.80     $3.20  ← CHANGED (was 169k)
+665 kΩ     Diff amp R2/R4 (Rail 6)             2    $0.80     $1.60
+40.2 kΩ    V_ref divider top (5V→1V)           5    $0.80     $4.00
+10.0 kΩ    V_ref divider bottom                5    $0.80     $4.00
+                                                    TOTAL:    $36.80
+
+────────────────────────────────────────────────────────────────────────
+STANDARD RESISTORS (1%, 0805 SMD)
+────────────────────────────────────────────────────────────────────────
+
+Value      Function                           Qty   Cost ea.  Subtotal
+────────────────────────────────────────────────────────────────────────
+10 kΩ      Wired-AND pull-up (R_pull)          1    $0.10     $0.10  ← NEW
+10 kΩ      P-FET gate pull-up (R1)             1    $0.10     $0.10
+100 Ω      P-FET gate series (R2)              1    $0.10     $0.10
+10 kΩ      Q_dis base resistor                 1    $0.10     $0.10
+100 kΩ     RETRY_PULSE pull-down               1    $0.10     $0.10
+1.0 MΩ     Blanking timer (R_blank)            1    $0.15     $0.15  ← NEW
+1.0 MΩ     Retry timer timing (R_timer)        1    $0.15     $0.15
+                                                    TOTAL:    $0.80
+
+────────────────────────────────────────────────────────────────────────
+CAPACITORS
+────────────────────────────────────────────────────────────────────────
+
+Value      Type       Voltage  Function                 Qty   Cost  Subtotal
+──────────────────────────────────────────────────────────────────────────────
+100 nF     X7R 0805   10V      Op-amp bypass (×2)        2    $0.20   $0.40
+100 nF     X7R 0805   10V      Comparator bypass (×2)    2    $0.20   $0.40
+100 nF     X7R 0805   10V      Logic IC bypass (×5)      5    $0.20   $1.00
+100 nF     X7R 0805   10V      V_ref decoupling (×5)     5    $0.20   $1.00
+100 nF     X7R 0805   10V      P-FET gate snubber (C2)   1    $0.20   $0.20
+10 nF      C0G 0805   50V      Blanking timer (C_blank)  1    $0.30   $0.30  ← NEW
+2.2 µF     X7R 1206   10V      Retry timer (C_timer)     1    $0.60   $0.60
+10 nF      C0G 0805   50V      Pulse differentiator      1    $0.30   $0.30
+                                                              TOTAL:  $4.20
+
+────────────────────────────────────────────────────────────────────────
+BILL OF MATERIALS SUMMARY
+────────────────────────────────────────────────────────────────────────
+
+Category                    Subtotal   vs v3.3
+─────────────────────────────────────────────────
+Active semiconductors       $3,975     -$800 (3 fewer ICs)
+Shunt resistors                $18     (no change)
+Precision resistors (0.1%)     $37     (no change)
+Standard resistors (1%)      $0.80     -$0.60 (fewer resistors)
+Capacitors                   $4.20     -$0.50 (no startup delay cap)
+─────────────────────────────────────────────────
+TOTAL COMPONENT COST:       $4,035     -$801 (20% reduction!)
+
+v3.3 total was: $4,836.60
+v4.0 total:     $4,035.00
+SAVINGS:        $801.60 (16.6% reduction)
+
+Additional non-quantified benefits:
+  - Simpler PCB routing (wired-AND bus vs OR cascade)
+  - Fewer potential failure points (9 ICs vs 12 ICs)
+  - Better performance (OPA4H838 faster response)
+  - Single power domain (simpler power distribution)
+
+================================================================================
+9. PCB LAYOUT GUIDELINES
+================================================================================
+
+BOARD SIZE TARGET: 70mm × 50mm (achievable with component reduction)
+
+LAYER STACKUP (4-layer minimum):
+  Layer 1: Top signal + high-current traces
+  Layer 2: Ground plane (solid pour, no splits)
+  Layer 3: 5V power plane (solid pour, single domain)
+  Layer 4: Bottom signal
+
+CRITICAL LAYOUT RULES:
+
+1. SINGLE POWER DOMAIN SIMPLIFICATION:
+   - 5V plane covers entire board (no splits, no isolation)
+   - All ICs powered from same 5V rail
+   - Simple star-ground from Q1 source pad
+   - No Buck #1 dependency concerns
+
+2. HIGH-CURRENT TRACES (Rails 1-2: 5A each):
+   - Trace width: 3mm minimum (2oz copper) for 3.3V AI core rails
+   - Use top layer only (minimal vias in current path)
+   - Shunt resistor pads: 4-wire Kelvin connection
+     * Two pads for current (wide, 3mm traces)
+     * Two pads for voltage sense (thin, 0.2mm traces to op-amp)
+   - Keep sense traces <20mm long, parallel routing ±0.5mm
+   - Ground plane cutout under shunt (avoid return current coupling)
+
+3. DIFFERENTIAL PAIR ROUTING (V+ and V- to each op-amp):
+   - Match lengths within 2mm
+   - Parallel routing, 0.3mm spacing
+   - Avoid crossing noisy signals (clock, digital logic)
+   - Shield with ground via fence if crossing digital area
+
+4. WIRED-AND BUS (CRITICAL NEW ROUTING):
+   - Route all 6 comparator outputs to single trace
+   - Star topology: 6 short stubs to central point
+   - Central point: place 10kΩ pull-up resistor here
+   - Total bus length <50mm
+   - Trace width: 0.2mm (low current)
+   - Keep away from switching nodes (P-FET gate, 5V_OUT)
+   - No special impedance control needed
+
+5. COMPARATOR REFERENCE (V_ref):
+   - 5 separate divider circuits (do not share single node)
+   - Each divider has dedicated 100nF cap to GND
+   - Place cap <2mm from comparator IN+ pin
+   - Route V_ref traces away from switching nodes
+
+6. TIMING CAPACITORS:
+   - C_blank (10nF) and C_timer (2.2µF): low-ESR X7R ceramic
+   - Place within 10mm of Schmitt buffer input pins
+   - Guard ring around timing caps (GND via fence, 5mm spacing)
+   - No switching traces near timing nodes
+
+7. P-FET GATE DRIVER:
+   - R1 (10kΩ pull-up): <5mm from gate pad
+   - R2 (100Ω series) + C2 (100nF snubber): <3mm from gate pad
+   - Gate trace: keep short (<15mm), no vias, 0.5mm width
+   - Source connection: wide pour, multiple vias to 5V plane
+
+8. CFP-14 PACKAGE (OPA4H838-SEP):
+   - Hermetic flatpack, not reflow-compatible
+   - Requires hand soldering or socket
+   - Land pattern: consult OPA4H838-SEP datasheet package drawing
+   - Same footprint as LMP7704-SP (CFP-14)
+   - Thermal relief: connect pins to ground plane via thermal vias
+   - Clearance around package: 3mm minimum (no components)
+
+9. THERMAL MANAGEMENT:
+   - Q1 (DPAK): large copper pour on drain pad, 10+ thermal vias
+   - Shunt resistors: thermal relief pads, expose to airflow
+   - No components under Q1 or shunts (allow natural convection)
+
+10. TEST POINTS (updated for v4.0):
+    - 5V_IN, 5V_OUT
+    - All 6 V_AMP_n signals (for trip threshold verification)
+    - GLOBAL_FAULT_n (wired-AND bus)
+    - BLANKING (blanking timer output)
+    - FAULT_LATCHED, ENABLE_GLOBAL, GATE_DRIVE
+    - TIMING_B (retry timer)
+    - Place test points on 0.1" grid for easy probing
+
+11. SILKSCREEN MARKINGS:
+    - "MacroSEL Protection v4.0" and date code
+    - Power domain: "5V SINGLE DOMAIN"
+    - Signal names at all test points
+    - Component reference designators
+    - Polarity marks for Q1, Q_dis
+    - "WIRED-AND BUS" label near comparator outputs
+
+================================================================================
+10. ASSEMBLY NOTES
+================================================================================
+
+COMPONENT PROCUREMENT:
+
+OPA4H838-SEP: New component in v4.0. Check availability from TI or authorized
+distributors. Verify radiation qualification documentation. Lead time may be
+12-20 weeks for space-grade parts.
+
+All other components: Same as v3.3 (TLV1704-SEP, SN54SC series, etc.)
+
+ASSEMBLY SEQUENCE:
+
+1. Solder all SMD components except CFP-14 packages
+   - Standard reflow or hand solder
+   - Use SAC305 lead-free or Sn63/Pb37 eutectic solder
+
+2. Hand-solder CFP-14 packages (U_AMP_A, U_AMP_B):
+   - OPA4H838-SEP has same CFP-14 footprint as LMP7704-SP
+   - Use soldering iron <350°C, chisel tip
+   - Solder pins 1-14 individually
+   - Avoid excessive heat (>10 seconds per pin)
+   - Inspect for bridging under microscope
+   - Alternative: CFP-14 socket if vibration environment allows
+
+3. Visual inspection under 10× magnification
+
+4. Power-on without load:
+   - Apply 5V to 5V_IN with current limit set to 100mA
+   - Verify 5V_OUT appears (should turn on immediately in v4.0)
+   - Measure quiescent current: should be ~7mA (all circuits on 5V)
+   - If >15mA, power off and check for shorts
+
+5. Functional test (see Section 11)
+
+HANDLING PRECAUTIONS:
+
+- ESD: Use wrist strap, grounded mat
+- OPA4H838-SEP: Handle as ESD-sensitive (HBM 4kV per datasheet)
+- Do NOT rework space-qualified ICs after initial solder
+- Thermal cycling can degrade hermeticity
+
+================================================================================
+11. TESTING PROCEDURES
+================================================================================
+
+EQUIPMENT REQUIRED:
+  - Bench power supply: 5V, 6A capability, current limiting
+  - Electronic loads: 6× programmable DC loads (0-10A, 0-5V)
+  - Oscilloscope: 4-channel, ≥100 MHz, 1 GSa/s
+  - DMM: 6.5 digit
+  - Load resistors and MOSFET switches for fault injection
+
+────────────────────────────────────────────────────────────────────────
+TEST 1: POWER-ON AND QUIESCENT CURRENT
+────────────────────────────────────────────────────────────────────────
+
+Setup:
+  - No loads on any rail
+  - Buck converters and PMIC present but no downstream loads
+  - Set power supply to 5V, current limit 100mA
+
+Procedure:
+  1a. Apply 5V to 5V_IN
+  1b. Observe 5V_OUT with oscilloscope
+  1c. Measure time from 5V_IN to 5V_OUT: should be immediate (<1ms)
+      NO startup delay in v4.0 - blanking happens AFTER FET turns on
+  1d. Verify 5V_OUT reaches 5V (within 50mV)
+  1e. Measure current: should be ~7mA (6.6mA typical + margin)
+
+Pass criteria:
+  - 5V_OUT appears within 10ms of 5V_IN application
+  - 5V_OUT voltage: 4.95V - 5.05V
+  - Quiescent current: 5-10mA (v4.0 has higher baseline due to always-on op-amps)
+
+Fail diagnosis:
+  - No 5V_OUT: Check Q1, latch may have powered up in SET state
+  - High current: Short circuit, check for solder bridges
+
+────────────────────────────────────────────────────────────────────────
+TEST 2: WIRED-AND BUS VERIFICATION (NEW TEST FOR v4.0)
+────────────────────────────────────────────────────────────────────────
+
+Purpose: Verify all 6 comparators properly connected to wired-AND bus
+
+Setup:
+  - System powered, all rails at 0% load
+  - DMM measuring GLOBAL_FAULT_n voltage
+
+Procedure:
+  2a. With no load (all V_AMP = 0V):
+      Measure GLOBAL_FAULT_n: should be HIGH (≈5V)
+      All comparators Hi-Z, pull-up active
+  
+  2b. Apply loads one rail at a time, increase to 160% trip:
+      Rail 1: 7.5A × 1.6 = 12A
+      Observe GLOBAL_FAULT_n drop to LOW (≈0V) when fault detected
+      Verify on oscilloscope: clean LOW transition
+  
+  2c. Remove load, verify GLOBAL_FAULT_n returns HIGH
+  
+  2d. Repeat for each rail individually
+
+Pass criteria:
+  - GLOBAL_FAULT_n = HIGH (>4.5V) with no faults
+  - GLOBAL_FAULT_n = LOW (<0.5V) when any single rail faults
+  - Clean transitions, no oscillation
+
+Fail diagnosis:
+  - Always LOW: One comparator stuck driving low, check for damage
+  - Never goes LOW: Pull-up missing, or wired-AND bus not connected
+  - Oscillation: Noise on bus, add 10pF cap to GLOBAL_FAULT_n node
+
+────────────────────────────────────────────────────────────────────────
+TEST 3: BLANKING WINDOW VERIFICATION (CRITICAL NEW TEST)
+────────────────────────────────────────────────────────────────────────
+
+Purpose: Verify 10ms blanking window properly masks inrush faults
+
+Setup:
+  - Inject artificial fault during Buck #1 startup
+  - Oscilloscope channels:
+    * Ch1: ENABLE_GLOBAL
+    * Ch2: BLANKING
+    * Ch3: GLOBAL_FAULT_n
+    * Ch4: FAULT_LATCHED
+
+Procedure:
+  3a. Power off completely, wait 10 seconds
+  3b. Apply 5V to 5V_IN
+  3c. Observe waveforms:
+      - ENABLE_GLOBAL rises (FET turns on)
+      - BLANKING rises simultaneously
+      - Buck #1 inrush causes GLOBAL_FAULT_n to pulse LOW
+      - But FAULT_LATCHED stays LOW (fault masked)
+      - After 10-15ms, BLANKING falls
+      - System continues running normally
+  
+  3d. Measure blanking duration: rising edge of ENABLE to falling edge of BLANKING
+      Expected: 9.5ms - 15.5ms
+
+Pass criteria:
+  - Blanking duration: 8-20ms (allows for component variation)
+  - FAULT_LATCHED does NOT set during blanking window
+  - System achieves stable operation after blanking expires
+
+Fail diagnosis:
+  - No blanking pulse: C_blank open, Schmitt input not connected
+  - Blanking too short (<5ms): Buck #1 inrush may trigger fault
+  - Blanking too long (>30ms): R_blank or C_blank wrong value
+  - Fault latches during blanking: OR gate logic error
+
+────────────────────────────────────────────────────────────────────────
+TEST 4: RAIL-BY-RAIL TRIP THRESHOLD (same as v3.3, updated for Rail 4)
+────────────────────────────────────────────────────────────────────────
+
+[Same procedure as v3.3 Test 2, with Rail 4 updated:]
+
+Rail 4 (1.35V, 0.4A nominal):
+  - Trip current: 0.6A (150%)
+  - Shunt: 50mΩ (was 100mΩ in v3.3)
+  - V_sense at trip: 0.6A × 50mΩ = 30mV
+  - Expected V_AMP: 32.9 × 30mV = 987mV
+  - Trip point: 0.57A - 0.63A (±5% tolerance)
+
+────────────────────────────────────────────────────────────────────────
+TEST 5: INFINITE RETRY VERIFICATION (same as v3.3)
+────────────────────────────────────────────────────────────────────────
+
+[Same procedure as v3.3 Test 4]
+
+Expected behavior unchanged:
+  - Fault detected → shutdown in <10µs
+  - Wait 0.7-1.7s (retry timer)
+  - Automatic restart with 10ms blanking
+  - If fault persists: immediate re-trip after blanking
+  - Infinite retry cycles
+
+────────────────────────────────────────────────────────────────────────
+TEST 6: RESPONSE TIME MEASUREMENT (improved with OPA4H838)
+────────────────────────────────────────────────────────────────────────
+
+[Same setup as v3.3 Test 3, but expect faster response times]
+
+Expected improvements:
+  - Rail 1-2: <1µs (was ~2.7µs with LMP7704)
+  - Rail 6: <3µs (was ~10µs with LMP7704)
+
+Pass criteria:
+  - All rails: T_total <5µs
+  - Rail 6 worst case: <8µs
+
+================================================================================
+12. FAILURE MODE ANALYSIS
+================================================================================
+
+FAILURE 1: False trip during normal operation
+  Likelihood: Very low (10ms blanking window prevents startup false trips)
+  Impact: Minor (automatic recovery within 1-2 seconds)
+  Mitigation: 150% threshold + blanking window provides dual protection
+
+FAILURE 2: Missed latchup during blanking window
+  Scenario: Latchup occurs within first 10ms after power-on
+  Likelihood: Extremely low (latchup requires sustained power, rare in first 10ms)
+  Impact: Component may see higher current for 10ms, but not thermal damage
+  Mitigation: 10ms is short enough to prevent thermal runaway
+  Residual risk: Accepted (hardware-only design trade-off)
+
+FAILURE 3: Wired-AND bus contention
+  Cause: Multiple comparators driving LOW simultaneously
+  Analysis: Open-drain outputs designed for this - no contention possible
+  All LOW outputs simply share current sink to GND
+  Impact: None (this is normal operation)
+
+FAILURE 4: Single comparator stuck LOW
+  Cause: Comparator damaged by SEE or other failure
+  Impact: GLOBAL_FAULT_n permanently LOW → latch always SET → FET always OFF
+  Detection: OBC sees device offline
+  Mitigation: OBC power cycles 5V_IN, if still offline, switch to backup unit
+
+FAILURE 5: OPA4H838-SEP TID degradation
+  Components at risk: OPA4H838-SEP rated 30 krad (was 100 krad for LMP7704-SP)
+  Expected dose: 9-45 krad over 3 years depending on shielding
+  Risk: Marginal at end-of-life with minimal shielding
+  Mitigation: Ensure ≥2mm Al shielding to keep dose <20 krad
+  Monitor: Offset voltage drift over mission life (telemetry)
+
+FAILURE 6: Blanking timer stuck HIGH
+  Cause: Schmitt trigger or RC circuit failure
+  Impact: Faults permanently masked, no protection
+  Detection: Difficult without external monitoring
+  Mitigation: Test blanking circuit thoroughly during qualification
+  OBC should monitor for expected power cycling pattern during faults
+
+FAILURE 7: Protection circuit SEL (same as v3.3)
+  All logic ICs: SEL LET = 43 MeV·cm²/mg
+  Comparators: SEL LET = 43 MeV·cm²/mg
+  Op-amps: SEL LET = 43 MeV·cm²/mg (was 85 for LMP7704, slightly higher risk)
+  Likelihood: Low (<1 event per year)
+  Recovery: OBC power cycles 5V_IN to clear protection circuit latchup
+
+All other failure modes from v3.3 remain valid and unchanged.
+
+================================================================================
+13. RESOLVED ISSUES FROM v3.3
+================================================================================
+
+ISSUE 1: Startup Deadlock (RESOLVED)
+  v3.3 problem: Q_start controlled by inverted ENABLE_GLOBAL created circular
+                dependency that prevented system from ever turning on
+  v4.0 solution: Removed entire startup delay circuit. Blanking window serves
+                 the inrush protection purpose correctly.
+
+ISSUE 2: Startup Delay vs Inrush Blanking (RESOLVED)
+  v3.3 problem: Startup delay occurred BEFORE FET turn-on, so it didn't mask
+                the inrush that occurs AFTER FET turn-on
+  v4.0 solution: 10ms blanking timer triggered by ENABLE_GLOBAL rising edge,
+                 masks faults for 10ms AFTER FET turns on. Correctly positioned.
+
+ISSUE 3: Rail 4 Voltage Drop (RESOLVED)
+  v3.3 problem: 100mΩ shunt × 400mA = 40mV drop (59% of tolerance budget)
+  v4.0 solution: 50mΩ shunt × 400mA = 20mV drop (30% of budget)
+                 Saves 20mV for PCB traces and transient tolerance
+
+ISSUE 4: Op-Amp Common Mode Headroom (RESOLVED)
+  v3.3 problem: LMP7704-SP powered at 3.3V, sensing 3.3V rails, zero margin
+  v4.0 solution: OPA4H838-SEP powered at 5V, sensing 3.3V rails, 1.8V margin
+                 No risk of common-mode violation
+
+ISSUE 5: Split Power Domains Complexity (RESOLVED)
+  v3.3 design: Two power domains (3.3V for op-amps, 5V for logic)
+               Required careful routing, domain crossing considerations
+  v4.0 design: Single 5V power domain for ALL circuits
+               Massive simplification in routing and power distribution
+
+ISSUE 6: Component Count and Cost (IMPROVED)
+  v3.3: 12 active ICs, ~$4,836 total BOM cost
+  v4.0: 9 active ICs, ~$4,035 total BOM cost
+        16.6% cost reduction, 25% IC count reduction
+
+ISSUE 7: Response Time Performance (IMPROVED)
+  v3.3: Worst-case 10.1µs (Rail 6 with LMP7704-SP 2.5 MHz GBW)
+  v4.0: Worst-case 3.9µs (Rail 6 with OPA4H838-SEP 10 MHz GBW)
+        2.6× improvement in worst-case response time
+
+OPEN ITEMS CARRIED FORWARD FROM v3.3:
+
+OPEN ITEM 1: CFP-14 Assembly Process
+  Status: Unchanged - OPA4H838-SEP uses same CFP-14 package as LMP7704-SP
+  Decision needed: Hand-solder or socket
+  Recommendation: Hand-solder with process control
+
+OPEN ITEM 2: ARM Cortex-A72 Process Node Confirmation
+  Status: Still unknown (confidential)
+  Impact: 150% threshold may be conservative if FinFET (14nm/16nm)
+  Recommendation: Request latchup test data from vendor if available
+
+================================================================================
+DOCUMENT REVISION HISTORY
+================================================================================
+
+v3.0 – Initial SMD design, CD4xxx logic, OP07 op-amps
+       Issue: Large component count, LM555 timer issues
+
+v3.1 – Infinite retry, RC + Schmitt timer
+       Issue: FATAL - timer resets when Buck #1 collapses, no autonomous retry
+
+v3.2 – Component redesign: BUP06CP P-FET, LMP7704-SP op-amps, TLV1704-SEP
+       Issue: STILL HAD FATAL FLAW - no SR latch to remember fault state
+
+v3.3 – Added SR latch, split power domains (3.3V/5V)
+       Issues: Startup deadlock, startup delay ineffective, split domain complexity
+
+v4.0 – FINAL DESIGN (this version)
+       ✓ OPA4H838-SEP op-amps (5V supply, 4× faster, zero-drift)
+       ✓ Single 5V power domain (massive simplification)
+       ✓ Wired-AND comparator bus (eliminates 2 ICs, simpler routing)
+       ✓ 10ms blanking window (properly masks inrush after FET turn-on)
+       ✓ Removed PGOOD/startup delay (wasn't solving right problem)
+       ✓ Rail 4 optimized (50mΩ shunt saves 20mV voltage drop)
+       ✓ Simplified enable logic (ENABLE = NOT(FAULT_LATCHED))
+       ✓ 16.6% cost reduction, 25% IC count reduction
+       ✓ 2.6× faster response time (worst case 10.1µs → 3.9µs)
+       
+       THIS VERSION IS PRODUCTION-READY
+       (subject to testing and CFP-14 assembly process qualification)
+
+================================================================================
+END OF MACROSEL PROTECTION v4.0 FINAL DESIGN DOCUMENT
+================================================================================

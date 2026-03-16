@@ -1,0 +1,1952 @@
+================================================================================
+MACRO-SEL PROTECTION SYSTEM - FINAL DESIGN v2.1
+SINGLE MASTER SWITCH WITH RC SNUBBER GATE DRIVER
+================================================================================
+
+Document Version: 2.1 (CORRECTED - RC Snubber Gate Driver)
+Date: February 2026
+Application: ARM Cortex-A72 Edge Computer - LEO Orbit
+Design: Single master switch, 6 current sensors, RC snubber for clean switching
+
+CHANGES FROM v2.0:
+- FIXED: P-FET gate driver now uses inverter (not AND gate)
+- ADDED: RC snubber for clean switching and EMI reduction
+- REMOVED: Erroneous R3 pull-down resistor
+- CLARIFIED: Direct step-by-step wiring instructions
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+1. SYSTEM ARCHITECTURE OVERVIEW
+2. MASTER PROTECTION CIRCUIT - CORRECTED GATE DRIVER (Option 3)
+3. CURRENT SENSE CIRCUITS (×6) - Detailed Wiring
+4. GLOBAL LOGIC CONTROLLER
+5. COMPLETE SYSTEM INTEGRATION
+6. REVISED BILL OF MATERIALS
+7. PCB LAYOUT GUIDELINES
+8. TESTING PROCEDURES
+9. FAILURE MODE ANALYSIS
+
+================================================================================
+1. SYSTEM ARCHITECTURE OVERVIEW
+================================================================================
+
+PROTECTION STRATEGY:
+- 1 master P-channel MOSFET switch (high-side, 5V input)
+- 6 independent current sensors (one per rail, for diagnostics)
+- Any fault → all rails shut down together
+- Hardware-only auto-retry: 5 attempts, 100ms between attempts
+- 300ms startup delay from PMIC_PGOOD
+- RC snubber gate driver for clean, reliable switching
+
+SYSTEM BLOCK DIAGRAM:
+
+    5V INPUT (spacecraft bus)
+         │
+         ↓
+    ┌────────────────────────────────┐
+    │  MASTER PROTECTION SWITCH      │
+    │                                │
+    │  P-FET: IRHLUC7970Z4          │
+    │  Gate Driver: CD4049 Inverter  │
+    │  RC Snubber: 100Ω + 100nF     │
+    │                                │
+    │  Control: ENABLE_GLOBAL        │
+    └────────┬───────────────────────┘
+             │ 5V Protected Output
+             │
+    ┌────────┴────────────────────────┐
+    │                                 │
+    ↓                                 ↓
+Buck #1 (3.3V 10A)              Buck #2 + PMIC
+    │                                 │
+    ├→ Rail 1: 3.3V 5A (AI)          ├→ Rail 3: 1.2V 3A
+    └→ Rail 2: 3.3V 5A (AI)          ├→ Rail 4: 1.35V 400mA
+                                     ├→ Rail 5: 1.8V 2A
+                                     └→ Rail 6: 2.5V 1A
+         │    │    │    │    │    │
+         ↓    ↓    ↓    ↓    ↓    ↓
+    ┌────────────────────────────────┐
+    │  6 CURRENT SENSE CIRCUITS      │
+    │  (Detect overcurrent)          │
+    │                                │
+    │  FAULT_1 ┐                    │
+    │  FAULT_2 │                    │
+    │  FAULT_3 ├→ 6-input OR gate   │
+    │  FAULT_4 │   → GLOBAL_FAULT   │
+    │  FAULT_5 │                    │
+    │  FAULT_6 ┘                    │
+    └────────────┬───────────────────┘
+                 │
+    ┌────────────▼───────────────────┐
+    │  GLOBAL LOGIC CONTROLLER       │
+    │                                │
+    │  • Startup delay (300ms)       │
+    │  • Retry timer (100ms)         │
+    │  • Retry counter (5 max)       │
+    │  • Permanent latch             │
+    │                                │
+    │  → ENABLE_GLOBAL ──────────────┼──→ To gate driver
+    └────────────────────────────────┘
+
+RESPONSE TIME: 10-18µs (well within 100µs macro-SEL requirement)
+COST: $1,001 (including RC snubber components)
+PCB AREA: ~9,600 mm² (120mm × 80mm)
+
+================================================================================
+2. MASTER PROTECTION CIRCUIT - CORRECTED GATE DRIVER (Option 3)
+================================================================================
+
+PURPOSE: This circuit switches the entire 5V power supply on/off.
+         Any latchup on any rail → this cuts power to everything.
+
+COMPONENTS NEEDED:
+------------------
+Q1:    IRHLUC7970Z4 - P-channel MOSFET, rad-hard, 100V, 30mΩ RDS(on)
+U1:    CD4049UBE/883B - Hex inverter (rad-hard, 100+ krad TID)
+R1:    10kΩ, 1/4W - Pull-up resistor (keeps FET OFF during startup)
+R2:    100Ω, 1/4W - Gate drive resistor (limits switching current)
+C1:    100µF, 16V tantalum - Output bulk capacitor
+C2:    100nF, 50V ceramic C0G - Gate snubber capacitor (NEW!)
+C3:    0.1µF, 50V ceramic - Inverter decoupling
+
+CRITICAL: We use a P-channel MOSFET on the HIGH SIDE.
+P-channel logic: Gate LOW = FET ON, Gate HIGH = FET OFF
+Therefore, we need an INVERTER between ENABLE_GLOBAL and gate.
+
+CORRECTED GATE DRIVER CIRCUIT (OPTION 3 WITH RC SNUBBER):
+---------------------------------------------------------
+
+                         +5V INPUT (SOURCE)
+                               │
+                               │
+                          [R1: 10kΩ]  ← Pull-up resistor
+                               │         (ensures FET OFF at startup)
+                               │
+                               ├─────────────────→ GATE pin (Q1)
+                               │                       │
+                               │                       │
+                          [R2: 100Ω]           [C2: 100nF] ← RC Snubber
+                               │                       │
+                               │                       │
+                         ┌─────▼───────┐               │
+    ENABLE_GLOBAL ───────┤  CD4049UBE  │               │
+    (from logic)         │  Inverter   │               │
+                         └─────────────┘               │
+                               │                       │
+                              GND                  +5V INPUT
+                                                   (SOURCE)
+
+
+COMPONENT FUNCTION EXPLANATION:
+-------------------------------
+
+**R1 (10kΩ pull-up to SOURCE):**
+- During power-up, inverter (U1) isn't powered yet
+- R1 pulls GATE to +5V (same as SOURCE)
+- VGS = 5V - 5V = 0V → P-FET is OFF (safe state)
+- Without R1, gate floats → FET could randomly turn ON → dangerous!
+
+**R2 (100Ω series resistor):**
+- MOSFET gate is a capacitor (~1500-2000pF)
+- Without R2, switching creates huge current spike (>1A)
+- R2 limits gate current to: I = 5V / 100Ω = 50mA (safe for inverter)
+- Creates controlled switching: τ = R2 × Cgate = 100Ω × 2000pF = 200ns
+- Reduces EMI and stress on inverter
+
+**C2 (100nF gate-to-source capacitor):**
+- RC snubber network: R2 + C2 form low-pass filter
+- Time constant: τ = R2 × C2 = 100Ω × 100nF = 10µs
+- Dampens high-frequency ringing on gate signal
+- Reduces voltage overshoot/undershoot during switching
+- Critical for space: Prevents gate oxide stress from transients
+- Reduces EMI emissions (cleaner switching waveform)
+
+**U1 (CD4049 inverter):**
+- Inverts ENABLE_GLOBAL logic:
+  * ENABLE_GLOBAL = HIGH → Inverter OUT = LOW → Gate LOW → VGS = -5V → FET ON
+  * ENABLE_GLOBAL = LOW → Inverter OUT = HIGH → Gate HIGH → VGS = 0V → FET OFF
+- Provides low-impedance drive (10-25mA source/sink)
+- Rad-hard version: 100+ krad TID tolerance
+
+**C1 (100µF bulk capacitor):**
+- Provides energy storage at output
+- Reduces voltage ripple
+- Critical for buck converter stability
+
+**How It Works:**
+- ENABLE_GLOBAL = HIGH (system should run):
+  → Inverter output = LOW (0V)
+  → Gate pulled LOW through R2
+  → VGS = 0V - 5V = -5V (negative = P-FET turns ON)
+  → 5V flows from INPUT to OUTPUT
+
+- ENABLE_GLOBAL = LOW (system should shut down):
+  → Inverter output = HIGH (+5V) or tri-state
+  → R1 pulls gate HIGH to +5V (SOURCE voltage)
+  → VGS = 5V - 5V = 0V (zero = P-FET turns OFF)
+  → No current flows, output voltage drops to 0V
+
+
+STEP-BY-STEP BUILD INSTRUCTIONS:
+--------------------------------
+
+STEP 1: Place the P-channel MOSFET (Q1)
+---------------------------------------
+
+Physical location: Top-left corner of PCB (Zone 1)
+
+Q1 pin identification (IRHLUC7970Z4 in TO-254 package):
+- Looking at package from top with leads pointing down
+- Left pin: DRAIN
+- Center pin: SOURCE (this connects to +5V INPUT)
+- Right pin: GATE (control input)
+
+Connection instructions:
+
+1. **SOURCE pin (center):**
+   - Solder to 5V INPUT pad
+   - Use WIDE trace: 150 mils (4mm) minimum width
+   - This trace carries full 5A system current
+   - Keep trace SHORT: <30mm from input connector to SOURCE pin
+   
+2. **DRAIN pin (left):**
+   - Solder to 5V OUTPUT pad
+   - Use WIDE trace: 150 mils (4mm) minimum width
+   - This connects to both buck converter inputs
+   - Route to buck converters with minimal length (<50mm)
+   
+3. **GATE pin (right):**
+   - Do NOT connect yet - we'll connect in Step 4
+   - Keep area around GATE pin clear for gate drive components
+
+
+STEP 2: Add the output bulk capacitor (C1)
+------------------------------------------
+
+Component: 100µF, 16V tantalum capacitor (polarized!)
+
+Physical placement:
+- Place within 10mm of Q1 DRAIN pin
+- Closer = better (minimizes parasitic inductance)
+
+Connection instructions:
+
+1. **Positive terminal (+):**
+   - Solder to Q1 DRAIN pin (5V OUTPUT net)
+   - Use short, wide trace or direct via if capacitor is on bottom layer
+   
+2. **Negative terminal (-):**
+   - Solder to GROUND plane
+   - Use multiple vias (3-4 vias minimum, 20 mil diameter)
+   - This creates low-inductance ground connection
+   
+**CRITICAL: Check polarity!** Reversed tantalum capacitor will explode.
+Look for polarity marking on capacitor body:
+- Stripe indicates POSITIVE terminal (or negative, check datasheet!)
+- When in doubt, measure with DMM in diode mode
+
+
+STEP 3: Build the RC snubber network (R2 + C2)
+----------------------------------------------
+
+Components:
+- R2: 100Ω, 1/4W metal film resistor
+- C2: 100nF (0.1µF), 50V ceramic capacitor (C0G/NP0 type)
+
+Physical placement:
+- Place within 20mm of Q1 GATE pin
+- Keep R2 and C2 close together (<10mm spacing)
+- This forms the RC snubber network
+
+Connection instructions:
+
+1. **Create a node called "GATE_NODE":**
+   - This is where GATE pin, R1, R2, and C2 all connect together
+   - On PCB: Use a small copper pour or wide junction (30-40 mils)
+   
+2. **Connect R2 (100Ω series resistor):**
+   - One end: Solder to GATE_NODE
+   - Other end: Solder to a pad labeled "INV_OUT" (inverter output)
+   - Use short trace: <20mm length, 15-20 mils width
+   
+3. **Connect C2 (100nF snubber capacitor):**
+   - One end: Solder to GATE_NODE
+   - Other end: Solder to SOURCE pin of Q1 (+5V INPUT)
+   - Keep this loop SMALL (minimizes noise pickup)
+   - Trace length: <15mm total
+   
+**How the RC network works:**
+- When inverter switches, current flows through R2 to charge/discharge gate
+- R2 limits current to safe level (50mA)
+- C2 provides AC path to ground for high-frequency noise
+- Together they create smooth, controlled switching
+
+
+STEP 4: Add the pull-up resistor (R1)
+-------------------------------------
+
+Component: R1 = 10kΩ, 1/4W metal film resistor
+
+Purpose: Ensures gate is HIGH (FET OFF) during power-up and when inverter
+         is not yet powered.
+
+Connection instructions:
+
+1. **One end of R1:**
+   - Solder to SOURCE pin of Q1 (+5V INPUT)
+   - Can share same pad as SOURCE pin connection
+   
+2. **Other end of R1:**
+   - Solder to GATE_NODE (same node as R2 and C2)
+   
+3. **Connect Q1 GATE pin:**
+   - Solder GATE pin to GATE_NODE
+   - This completes the connection: SOURCE-R1-GATE_NODE-GATE
+
+**Now the gate has:**
+- Pull-up through R1 (weak, 10kΩ)
+- Drive from inverter through R2 (strong, 100Ω)
+- AC filtering through C2 (100nF to SOURCE)
+
+
+STEP 5: Install and wire the inverter (U1)
+------------------------------------------
+
+Component: CD4049UBE/883B (Hex inverter, DIP-14 or SOIC-14 package)
+
+CD4049 pinout (DIP-14 package):
+     ┌─────┴─────┐
+  IN1│1       14│ VCC (+5V)
+ OUT1│2       13│ IN6
+  IN2│3       12│ OUT6
+ OUT2│4       11│ IN5
+  IN3│5       10│ OUT5
+ OUT3│6        9│ IN4
+  GND│7        8│ OUT4
+     └───────────┘
+
+We only use ONE inverter (Gate 1: pins 1 and 2).
+Other 5 inverters can be used for other signals or left unconnected.
+
+Physical placement:
+- Place within 30mm of Q1 GATE pin
+- Orient with pin 1 at top-left (standard IC orientation)
+
+Connection instructions:
+
+1. **Power connections FIRST:**
+   - Pin 14 (VCC): Connect to +5V OUTPUT (the protected 5V rail)
+   - Pin 7 (GND): Connect to ground plane with via
+   - Add C3 (0.1µF ceramic) from pin 14 to pin 7 (right next to IC)
+   
+   **Important:** Power inverter from OUTPUT side, not INPUT side!
+   This way, when master switch is OFF, inverter also loses power
+   and won't try to drive the gate.
+
+2. **Input connection (control signal):**
+   - Pin 1 (IN1): Connect to signal labeled "ENABLE_GLOBAL"
+   - This signal comes from global logic controller (Section 4)
+   - Use 15-20 mil trace, can be longer (up to 100mm OK)
+   
+3. **Output connection (gate drive):**
+   - Pin 2 (OUT1): Connect to the "INV_OUT" pad (already connected to R2)
+   - Use 15-20 mil trace, keep SHORT (<20mm to R2)
+   - This is the gate drive signal
+
+4. **Unused inverter inputs (pins 3, 5, 9, 11, 13):**
+   - Option A: Leave unconnected (floating inputs OK for CD4049)
+   - Option B: Tie to GND or VCC (more robust against noise)
+   - Recommended: Tie all unused inputs to GND through 10kΩ resistors
+
+
+STEP 6: Test the master switch before proceeding
+-------------------------------------------------
+
+Before connecting to the rest of the system, verify master switch works:
+
+**Test 1: Static check (no power)**
+- Measure resistance SOURCE to DRAIN: Should be >1MΩ (FET off)
+- Measure resistance GATE to SOURCE: Should be >1MΩ (no leakage)
+
+**Test 2: Power-up check**
+- Apply 5V to INPUT (use current-limited bench supply, 100mA limit)
+- Leave ENABLE_GLOBAL disconnected (floating)
+- Measure voltage at OUTPUT: Should be 0V (FET off due to R1 pull-up)
+- Measure GATE voltage: Should be ~5V (pulled high by R1)
+
+**Test 3: Enable test**
+- With 5V applied to INPUT
+- Connect ENABLE_GLOBAL to +5V (use jumper wire)
+- Measure inverter output (pin 2 of U1): Should be ~0V (LOW)
+- Measure GATE voltage: Should be ~0V (pulled low through R2)
+- Measure OUTPUT voltage: Should be ~4.95V (FET on, small drop from RDS(on))
+- Disconnect ENABLE_GLOBAL
+- OUTPUT should return to 0V
+
+**Test 4: Load test**
+- Connect 10Ω resistor from OUTPUT to GND (draws 500mA)
+- Enable switch (ENABLE_GLOBAL = HIGH)
+- Measure OUTPUT voltage: Should be ~4.9V (FET on with load)
+- Measure FET body temperature after 1 minute: Should be barely warm
+- Calculate power dissipation: P = I² × RDS(on) = 0.5² × 0.03 = 7.5mW (negligible)
+
+**Test 5: Switching waveform (requires oscilloscope)**
+- Connect scope Ch1 to ENABLE_GLOBAL
+- Connect scope Ch2 to GATE voltage
+- Connect scope Ch3 to OUTPUT voltage
+- Trigger on Ch1 rising edge
+- Apply square wave to ENABLE_GLOBAL (1 Hz, 0-5V)
+- Verify clean switching:
+  * GATE should smoothly transition (RC time constant visible)
+  * No ringing or oscillation on GATE waveform
+  * OUTPUT should follow ~10µs after GATE transition
+
+If all tests pass, master switch is working correctly!
+
+
+PHYSICAL LAYOUT TIPS:
+--------------------
+
+Component placement (Zone 1 on PCB, ~30mm × 30mm area):
+
+    [5V INPUT] ──→ [Q1 SOURCE]
+    connector         │ (center pin)
+                      │
+                 [Q1 body] ← MOSFET, vertical orientation
+                      │
+                 [Q1 DRAIN] ──→ [C1] ──→ [5V OUTPUT]
+                 (left pin)       │          │
+                                 GND      to bucks
+    
+    Near GATE pin:
+    
+         SOURCE
+            │
+         [R1: 10k] pull-up
+            │
+            ├──────── GATE (right pin)
+            │              │
+         [R2: 100]    [C2: 100nF]
+            │              │
+         [U1: inv]      SOURCE
+         CD4049
+            │
+        ENABLE_GLOBAL
+
+Keep all gate drive components (R1, R2, C2, U1) within 30mm of GATE pin.
+
+Trace widths:
+- 5V INPUT to SOURCE: 150 mils (4mm)
+- DRAIN to 5V OUTPUT: 150 mils (4mm)
+- GATE signal traces: 15-20 mils
+- Inverter power (VCC, GND): 20-30 mils
+
+Ground connections:
+- C1 negative: Multiple vias to ground plane (3-4 vias)
+- C2 to SOURCE: Wide trace or pour
+- U1 GND (pin 7): Via directly to ground plane
+- C3 (decoupling): Via to ground plane
+
+
+TROUBLESHOOTING:
+---------------
+
+**Problem: OUTPUT is always 0V, even with ENABLE_GLOBAL = HIGH**
+
+Possible causes:
+1. Gate voltage stuck HIGH → Check inverter:
+   - Measure pin 2 of U1, should be LOW when ENABLE_GLOBAL = HIGH
+   - If HIGH, inverter might be damaged or not powered
+   
+2. P-FET damaged:
+   - Measure GATE-SOURCE voltage with ENABLE_GLOBAL = HIGH
+   - Should be ~-5V (GATE at 0V, SOURCE at 5V)
+   - If VGS is 0V, FET might be damaged (gate-source short)
+   
+3. Wrong FET polarity:
+   - Verify SOURCE is at +5V and DRAIN goes to output
+   - Common mistake: SOURCE and DRAIN swapped
+
+**Problem: OUTPUT voltage = INPUT voltage even when ENABLE_GLOBAL = LOW**
+
+Possible causes:
+1. Gate stuck LOW → FET always ON:
+   - Check R1 is connected (pull-up might be missing)
+   - Measure GATE voltage with ENABLE = LOW, should be ~5V
+   
+2. Inverter output stuck LOW:
+   - Measure pin 2 of U1 with ENABLE = LOW
+   - Should be HIGH (~5V) or floating
+   - If stuck LOW, inverter damaged
+
+**Problem: FET gets very hot (>60°C) with light load**
+
+Possible causes:
+1. RDS(on) too high:
+   - Measure GATE-SOURCE voltage, should be close to -5V
+   - If VGS = -2V or -3V, gate drive insufficient
+   - Check R2 (should be 100Ω, not 10kΩ!)
+   
+2. Wrong FET part number:
+   - Verify IRHLUC7970Z4 (not a different FET)
+   - RDS(on) should be ~30mΩ at VGS = -5V
+
+**Problem: Gate voltage oscillates or rings**
+
+Solution: This is what C2 (snubber cap) should fix!
+1. Verify C2 is installed (100nF from GATE to SOURCE)
+2. Check C2 placement, should be very close to GATE pin (<15mm)
+3. If still ringing, increase C2 to 220nF or 470nF
+
+**Problem: Inverter gets hot**
+
+Possible causes:
+1. R2 missing or wrong value:
+   - Without R2, gate current can spike to >1A
+   - Check R2 = 100Ω is in series with inverter output
+   
+2. Too much capacitive load:
+   - If C2 is very large (>1µF), inverter has to charge it quickly
+   - Keep C2 at 100nF
+
+
+ELECTRICAL SPECIFICATIONS:
+-------------------------
+
+Input voltage: 5.0V ±0.25V (spacecraft bus)
+Output voltage: 4.85-4.95V (drop from RDS(on))
+Maximum current: 6A (derated from 10A FET rating)
+Continuous current: 5A
+RDS(on): 30mΩ typical at VGS = -5V, TA = 25°C
+Power dissipation at 5A: P = I² × R = 25 × 0.03 = 0.75W
+Turn-on time: ~10µs (RC time constant: 100Ω × 100nF)
+Turn-off time: ~10µs
+Total response time: <20µs (detection + logic + switch)
+
+Temperature rise (worst case):
+- Thermal resistance: Rθ(JA) = 50°C/W (with thermal vias)
+- ΔT = P × Rθ = 0.75W × 50°C/W = 37.5°C
+- Max junction temp: 25°C + 37.5°C = 62.5°C (well within limit)
+
+
+SUMMARY OF MASTER SWITCH CIRCUIT:
+---------------------------------
+
+INPUT:  5V from spacecraft power bus
+        ↓
+STAGE 1: P-channel MOSFET switch (Q1)
+         Controlled by gate voltage (LOW = ON, HIGH = OFF)
+         RDS(on) = 30mΩ, power loss = 0.75W at 5A
+        ↓
+STAGE 2: RC snubber network (R2 + C2)
+         Smooths switching transitions
+         Reduces EMI and ringing
+         Time constant: 10µs
+        ↓
+STAGE 3: Inverter gate driver (U1)
+         Converts ENABLE_GLOBAL (active HIGH) to gate drive (active LOW)
+         Provides 10-25mA drive current
+        ↓
+OUTPUT: 5V protected power (0V when disabled, 4.9V when enabled)
+        Feeds both buck converters and all 6 rails
+
+
+================================================================================
+3. CURRENT SENSE CIRCUITS (×6) - Detailed Wiring Instructions
+================================================================================
+
+PURPOSE: Each rail has its own current sensor to detect overcurrent/latchup.
+         Six sensors feed into OR gate.
+         Any sensor trips → master switch turns OFF entire system.
+
+BUILD 6 IDENTICAL COPIES (one per rail with different R_SENSE values)
+
+COMPONENTS PER RAIL:
+-------------------
+R_SENSE:  Sense resistor (value varies per rail - see table)
+U_AMP:    OP07CP/883B (precision op-amp, bipolar, rad-hard)
+U_COMP:   LM139AJ/883C (quad comparator, one comparator per rail)
+R4-R10:   Support resistors (gain setting, voltage reference, etc.)
+C2-C4:    Decoupling and filtering capacitors
+
+SENSE RESISTOR TABLE:
+--------------------
+┌──────────┬───────────┬────────────┬───────────┬──────────────────┐
+│   Rail   │  Voltage  │   Normal   │   Trip    │   R_SENSE Value  │
+│   Name   │           │   Current  │  Current  │   & Power Rating │
+├──────────┼───────────┼────────────┼───────────┼──────────────────┤
+│ Rail 1   │  3.3V     │   5.0A     │   5.8A    │  10mΩ, 2W        │
+│ (AI #1)  │           │            │           │                  │
+├──────────┼───────────┼────────────┼───────────┼──────────────────┤
+│ Rail 2   │  3.3V     │   5.0A     │   5.8A    │  10mΩ, 2W        │
+│ (AI #2)  │           │            │           │                  │
+├──────────┼───────────┼────────────┼───────────┼──────────────────┤
+│ Rail 3   │  1.2V     │   3.0A     │   3.5A    │  20mΩ, 2W        │
+│ (CPU/RAM)│           │            │           │                  │
+├──────────┼───────────┼────────────┼───────────┼──────────────────┤
+│ Rail 4   │  1.35V    │   0.4A     │   0.5A    │  100mΩ, 1W       │
+│ (CPU)    │           │            │           │                  │
+├──────────┼───────────┼────────────┼───────────┼──────────────────┤
+│ Rail 5   │  1.8V     │   2.0A     │   2.3A    │  30mΩ, 1W        │
+│(CPU/eMMC)│           │            │           │                  │
+├──────────┼───────────┼────────────┼───────────┼──────────────────┤
+│ Rail 6   │  2.5V     │   1.0A     │   1.2A    │  50mΩ, 1W        │
+│ (CPU/RAM)│           │            │           │                  │
+└──────────┴───────────┴────────────┴───────────┴──────────────────┘
+
+
+DETAILED BUILD INSTRUCTIONS (using Rail 3 as example: 1.2V @ 3A)
+----------------------------------------------------------------
+
+STAGE 1: Install Sense Resistor (R_SENSE = 20mΩ, 2W)
+-----------------------------------------------------
+
+This resistor measures current by voltage drop: V = I × R
+
+Physical placement:
+- Place R_SENSE as close as possible to rail power input
+- For Rail 3: Right at PMIC output pin for 1.2V
+- Distance from PMIC to R_SENSE: <10mm ideal, <20mm acceptable
+
+**CRITICAL: Use 4-WIRE KELVIN CONNECTION**
+
+Why 4-wire? Eliminates errors from trace resistance.
+
+Resistor body has 4 connection points:
+
+         RAIL_IN ═══════════════════════════════ RAIL_OUT
+         (from PMIC)     R_SENSE body            (to CPU/RAM)
+                          [▓▓▓▓▓▓▓▓]
+                  Force+ │          │ Force-     ← Main current path
+                  Pad    │          │  Pad         (wide traces)
+                         │          │
+                    Sense+│          │Sense-      ← Voltage sensing
+                    Pad   │          │ Pad          (thin traces)
+
+Connection instructions:
+
+1. **Force+ pad (left side of resistor):**
+   - Solder to RAIL_IN (from PMIC 1.2V output)
+   - Use WIDE trace: 80 mils (2mm) minimum
+   - This carries the full 3A load current
+   - Trace length: Keep SHORT (<20mm to PMIC output)
+
+2. **Force- pad (right side of resistor):**
+   - Solder to RAIL_OUT (to CPU and RAM load)
+   - Use WIDE trace: 80 mils (2mm) minimum
+   - This also carries full 3A load current
+   - Route to load with minimal length
+
+3. **Sense+ pad (left side, separate from Force+):**
+   - Solder thin trace (10-15 mils wide) to Force+ pad
+   - Route this trace AWAY from power path (avoid coupling noise)
+   - Keep trace SHORT: <30mm total to op-amp
+   - Connect to OP07 pin 3 (IN+ / non-inverting input)
+   - This senses positive side of resistor voltage drop
+
+4. **Sense- pad (right side, separate from Force-):**
+   - Solder thin trace (10-15 mils wide) to Force- pad
+   - Route parallel to Sense+ trace (20-30 mils spacing)
+   - Same length as Sense+ trace (matched pair)
+   - Connect to OP07 pin 2 (IN- / inverting input)
+   - This senses negative side of resistor voltage drop
+
+**Why this works:**
+- Force+ and Force- carry current → have voltage drops on traces
+- Sense+ and Sense- carry NO current → measure true voltage across R_SENSE
+- Op-amp sees: V_sense = Sense+ - Sense- = I × R_SENSE only
+- Trace resistance errors eliminated!
+
+Expected voltages:
+- Normal 3A: V_sense = 3A × 20mΩ = 60mV
+- Trip 3.5A: V_sense = 3.5A × 20mΩ = 70mV
+
+
+STAGE 2: Build Op-Amp Circuit (U_AMP = OP07)
+--------------------------------------------
+
+This amplifies tiny sense voltage (60mV) to usable voltage (1.2V)
+
+OP07 pinout (DIP-8 package):
+     
+        ┌─────┴─────┐
+   NULL │1        8│ NC
+     IN-│2        7│ VCC (+5V)
+     IN+│3        6│ OUT
+    GND │4        5│ NULL
+        └───────────┘
+
+Physical placement:
+- Place within 30mm of R_SENSE
+- Orient with pin 1 at top-left
+
+Connection sequence:
+
+**1. Power first (ALWAYS connect power first on any IC!):**
+
+   Pin 7 (VCC):
+   - Connect to +5V rail (use protected 5V from master switch output)
+   - Add 0.1µF ceramic cap (C3) directly from pin 7 to pin 4
+   - Place cap body <5mm from IC pins (critical for stability)
+   
+   Pin 4 (GND):
+   - Connect to ground plane using via (12-20 mil via)
+   - Keep connection SHORT and WIDE (use 20+ mil trace or direct via)
+
+**2. Input connections:**
+
+   Pin 3 (IN+ / non-inverting input):
+   - Connect to Sense+ trace from R_SENSE
+   - Add 0.1µF filter cap (C2) from pin 3 to GND (filters noise)
+   - Place C2 within 10mm of pin 3
+   
+   Pin 2 (IN- / inverting input):
+   - Connect to Sense- trace from R_SENSE
+   - NO capacitor here (only on + input)
+
+**3. Set the gain (we want gain = 20):**
+
+   We're building a **non-inverting differential amplifier**
+   Formula: Gain = 1 + (R6/R5)
+   For gain = 20: R6 = 19 × R5
+   
+   Component values:
+   - R5 = 10kΩ (from IN- to GND)
+   - R6 = 200kΩ (from IN- to OUT)
+   - R4 = 10kΩ (from IN+ to GND, balances input impedance)
+
+   Physical connections:
+   
+   a) Solder R4 (10kΩ):
+      - One end to pin 3 (IN+)
+      - Other end to GND (use same ground as C2)
+   
+   b) Solder R5 (10kΩ):
+      - One end to pin 2 (IN-)
+      - Other end to GND (near pin 4)
+   
+   c) Solder R6 (200kΩ) - feedback resistor:
+      - One end to pin 2 (IN-)
+      - Other end to pin 6 (OUT)
+      - This creates negative feedback loop that sets gain
+
+**4. Output connection:**
+
+   Pin 6 (OUT):
+   - This goes to comparator input (we'll connect in next stage)
+   - Label this net "V_AMP_3" (for Rail 3)
+   
+   Output voltage calculation:
+   - V_AMP = Gain × V_sense = 20 × (Sense+ - Sense-)
+   - Normal: 20 × 60mV = 1.2V
+   - Trip: 20 × 70mV = 1.4V
+
+**5. NULL pins (offset trimming):**
+
+   Pins 1 and 5:
+   - Leave unconnected (NC) for now
+   - Only use if you need <100µV offset precision
+   - For this application, OP07 natural offset (<500µV) is fine
+
+
+Testing the op-amp circuit:
+
+Test 1: Power check
+- Apply 5V to pin 7
+- Measure current into pin 7: Should be 2-4mA (quiescent)
+- Measure voltage at pin 4: Should be 0V (ground)
+
+Test 2: Zero input check
+- With no current through R_SENSE (rail not loaded)
+- Both Sense+ and Sense- should be at same voltage
+- Measure pin 6 output: Should be <50mV (near zero)
+- If >100mV, check resistor values (R4, R5, R6)
+
+Test 3: Gain verification
+- Force known current through rail (use electronic load)
+- Example: 3.0A load on Rail 3
+- Measure Sense+ to Sense-: Should be 60mV
+- Measure pin 6 (OUT): Should be 1.2V ±10%
+- Calculated gain: 1.2V / 60mV = 20 ✓
+
+
+STAGE 3: Build Comparator Circuit (U_COMP = LM139)
+--------------------------------------------------
+
+Compares op-amp output to reference voltage.
+When output > reference → comparator trips → signals fault.
+
+LM139 pinout (DIP-14, quad comparator):
+
+        ┌─────┴─────┐
+    OUT1│1       14│ OUT4
+    IN1-│2       13│ IN4-
+    IN1+│3       12│ IN4+
+     GND│4       11│ VCC (+5V)
+    IN2+│5       10│ IN3-
+    IN2-│6        9│ IN3+
+    OUT2│7        8│ OUT3
+        └───────────┘
+
+We use comparator #1 (pins 1, 2, 3) for Rail 3.
+Other comparators used for other rails (can fit 4 rails per IC).
+
+Physical placement:
+- Within 30mm of OP07 for this rail
+- Can share one LM139 between multiple rails (4 comparators per IC)
+
+Connection sequence:
+
+**1. Power connections:**
+
+   Pin 11 (VCC):
+   - Connect to +5V
+   - Add 0.1µF ceramic cap (C4) from pin 11 to pin 4 (<5mm from IC)
+   
+   Pin 4 (GND):
+   - Via to ground plane
+
+**2. Create reference voltage (V_REF):**
+
+   Trip occurs when current exceeds 3.5A
+   V_sense at trip = 3.5A × 20mΩ = 70mV
+   V_amp at trip = 70mV × 20 = 1.4V
+   
+   We want V_REF slightly below 1.4V, so use V_REF = 1.35V
+   (Margin: 1.4V - 1.35V = 50mV prevents false trips)
+
+   Create 1.35V from 5V supply using voltage divider:
+   
+   V_REF = 5V × [R8 / (R7 + R8)]
+   For V_REF = 1.35V: R8/(R7+R8) = 1.35/5 = 0.27
+   
+   If R8 = 100kΩ:
+   R7 = 270kΩ
+   Actual: V_REF = 5V × (100k/(270k+100k)) = 1.35V ✓
+
+   Physical connections:
+   
+   a) Solder R7 (270kΩ):
+      - One end to +5V rail
+      - Other end to a node labeled "V_REF_3"
+   
+   b) Solder R8 (100kΩ):
+      - One end to V_REF_3 node
+      - Other end to GND
+   
+   c) Add 0.1µF cap from V_REF_3 to GND (filters noise)
+      - Place within 5mm of V_REF node
+
+**3. Connect comparator inputs:**
+
+   Pin 3 (IN1+ / non-inverting input):
+   - Connect to op-amp output (OP07 pin 6 / V_AMP_3)
+   - This is the signal we're monitoring
+   
+   Pin 2 (IN1- / inverting input):
+   - Connect to V_REF_3 node (1.35V reference)
+   
+   Configuration: **IN+ > IN- → output goes LOW**
+   
+   Logic:
+   - Normal: V_AMP = 1.2V < V_REF = 1.35V
+     → IN+ < IN- → Output HIGH (no fault)
+   
+   - Latchup: V_AMP = 1.4V > V_REF = 1.35V
+     → IN+ > IN- → Output goes LOW (fault detected!)
+
+**4. Add hysteresis (prevents oscillation):**
+
+   Without hysteresis, comparator can oscillate when V_AMP ≈ V_REF.
+   
+   Add R9 (10kΩ) from output to IN+:
+   - One end to pin 1 (OUT1)
+   - Other end to pin 3 (IN1+)
+   
+   This creates positive feedback:
+   - When output goes LOW, it pulls IN+ down slightly
+   - Requires V_AMP to drop more before output returns HIGH
+   - Hysteresis ≈ 50-100mV (prevents rapid toggling)
+
+**5. Output connection:**
+
+   Pin 1 (OUT1) is **open-collector** (needs pull-up resistor!)
+   
+   Solder R10 (10kΩ) from pin 1 to +5V:
+   - This pulls output HIGH when comparator is not tripped
+   
+   Output logic:
+   - Normal: Pin 1 = HIGH (~5V, pulled up by R10)
+   - Fault: Pin 1 = LOW (~0V, pulled to GND internally)
+   
+   Connect pin 1 to signal labeled **"FAULT_3"**
+   - This goes to OR gate in global logic (Section 4)
+
+
+Testing the comparator:
+
+Test 1: Reference voltage
+- Measure V_REF_3 node: Should be 1.35V ±5%
+- If wrong, check R7 and R8 values
+
+Test 2: Normal operation (no fault)
+- With rail at normal load (3A)
+- V_AMP should be ~1.2V
+- FAULT_3 should be HIGH (~5V)
+- Measure pin 1: Should be ~5V (pulled up)
+
+Test 3: Trip test
+- Increase rail current to 3.5A or more
+- V_AMP should exceed 1.4V
+- FAULT_3 should go LOW
+- Measure pin 1: Should drop to ~0V
+
+Test 4: Hysteresis test
+- Start at trip current (3.5A)
+- FAULT_3 = LOW
+- Slowly reduce current
+- FAULT_3 should return HIGH at ~3.3-3.4A (below original trip)
+- This confirms hysteresis is working
+
+
+COMPONENT VALUES FOR ALL 6 RAILS:
+---------------------------------
+
+Everything identical except R_SENSE and V_REF divider (R7/R8).
+
+┌──────┬──────────┬────────────┬────────┬──────────┬──────────────────┐
+│ Rail │ R_SENSE  │ V_sense @  │ V_AMP  │  V_REF   │  R7 / R8 values  │
+│      │          │    trip    │  trip  │  target  │  (5V divider)    │
+├──────┼──────────┼────────────┼────────┼──────────┼──────────────────┤
+│  1   │  10mΩ 2W │   58mV     │ 1.16V  │  1.10V   │ 180kΩ / 47kΩ     │
+│  2   │  10mΩ 2W │   58mV     │ 1.16V  │  1.10V   │ 180kΩ / 47kΩ     │
+│  3   │  20mΩ 2W │   70mV     │ 1.40V  │  1.35V   │ 270kΩ / 100kΩ    │
+│  4   │  100mΩ 1W│   50mV     │ 1.00V  │  0.95V   │ 220kΩ / 47kΩ     │
+│  5   │  30mΩ 1W │   69mV     │ 1.38V  │  1.33V   │ 270kΩ / 100kΩ    │
+│  6   │  50mΩ 1W │   60mV     │ 1.20V  │  1.15V   │ 220kΩ / 56kΩ     │
+└──────┴──────────┴────────────┴────────┴──────────┴──────────────────┘
+
+All other components (R4, R5, R6, R9, R10) same for all rails.
+Op-amp gain = 20 for all rails.
+
+
+SIGNAL FLOW SUMMARY:
+-------------------
+
+For each rail (example Rail 3):
+
+INPUT: Current flowing through 1.2V rail
+       │
+       ↓
+STAGE 1: Sense resistor converts to voltage
+         I × 20mΩ = V_sense (60mV nominal, 70mV trip)
+       │
+       ↓
+STAGE 2: Op-amp amplifies by 20×
+         V_AMP = 20 × V_sense (1.2V nominal, 1.4V trip)
+       │
+       ↓
+STAGE 3: Comparator compares to 1.35V reference
+         If V_AMP > 1.35V → FAULT_3 = LOW
+         If V_AMP < 1.35V → FAULT_3 = HIGH
+       │
+       ↓
+OUTPUT: FAULT_3 signal (one per rail, 6 total)
+        Goes to OR gate in Section 4
+
+
+PCB LAYOUT FOR CURRENT SENSE CIRCUITS:
+--------------------------------------
+
+Arrange 6 sense circuits in 2 rows of 3:
+
+    Zone 2 (Center of PCB, 90mm × 40mm):
+    
+    Row 1:  [Rail 1]  [Rail 2]  [Rail 3]
+            sense     sense     sense
+            circuit   circuit   circuit
+    
+    Row 2:  [Rail 4]  [Rail 5]  [Rail 6]
+            sense     sense     sense
+            circuit   circuit   circuit
+
+Each sense circuit footprint: ~30mm × 18mm
+
+Keep identical layout for all 6:
+- R_SENSE at left edge (near power input)
+- OP07 in center
+- LM139 comparator to right
+- Support components around ICs
+
+This makes assembly easier and reduces design errors.
+
+
+================================================================================
+4. GLOBAL LOGIC CONTROLLER
+================================================================================
+
+PURPOSE: Combines 6 fault signals, implements retry logic, controls enable.
+
+COMPONENTS:
+----------
+U2:   2× CD4072BE/883B (dual 4-input OR gate) - for 6-input OR
+U3:   CD4093BE/883B (quad NAND Schmitt trigger) - startup delay
+U4:   LM555CN/883C (timer) - retry delay generator
+U5:   CD4017BE/883B (decade counter) - counts retry attempts
+U6:   CD4013BE/883B (dual D flip-flop) - latch-off after 5 retries
+U7:   CD4081BE/883B (quad AND gate) - enable logic
+U8:   CD4049UBE/883B (hex inverter) - logic inversion
+
+All ICs are QML/QMLV space-qualified versions (/883B suffix).
+
+
+SECTION A: STARTUP DELAY (300ms from PMIC_PGOOD)
+------------------------------------------------
+
+Prevents false trips during power-up inrush.
+
+Components:
+- R11: 1MΩ timing resistor
+- C5: 330nF timing capacitor
+- U3: CD4093 Schmitt trigger (one gate used as buffer)
+
+Circuit:
+
+    PMIC_PGOOD ────┬─────[R11: 1MΩ]─────┬──→ Schmitt IN
+                   │                     │
+                   │                  [C5: 330nF]
+                   │                     │
+                   └─────────────────────┴──→ GND
+
+Time constant: τ = R × C = 1MΩ × 330nF = 330ms
+
+Step-by-step connections:
+
+1. **Locate PMIC_PGOOD signal:**
+   - This comes from MC33PF8100 PMIC (check PMIC datasheet for pin)
+   - It goes HIGH when PMIC outputs are stable and in regulation
+   - Typical signal: 0V (not ready) → 3.3V or 5V (ready)
+
+2. **Build RC delay network:**
+   
+   a) Solder one end of R11 (1MΩ) to PMIC_PGOOD trace
+   
+   b) Solder other end of R11 to a node (call it "DELAY_NODE")
+   
+   c) Solder one end of C5 (330nF ceramic) to DELAY_NODE
+   
+   d) Solder other end of C5 to GROUND
+   
+   When PMIC_PGOOD goes HIGH, C5 charges through R11.
+   Voltage at DELAY_NODE rises exponentially: V(t) = VCC × (1 - e^(-t/RC))
+   After ~330ms, voltage reaches ~63% of final value.
+
+3. **Connect Schmitt trigger (U3 = CD4093):**
+   
+   CD4093 pinout (DIP-14):
+        ┌─────┴─────┐
+   IN1A │1       14│ VCC
+   IN1B │2       13│ IN4B
+   OUT1 │3       12│ IN4A
+   OUT2 │4       11│ OUT4
+   IN2A │5       10│ OUT3
+   IN2B │6        9│ IN3B
+    GND │7        8│ IN3A
+        └───────────┘
+   
+   We use gate #1 (pins 1, 2, 3).
+   
+   Power connections:
+   - Pin 14 (VCC): +5V
+   - Pin 7 (GND): Ground
+   - Add 0.1µF cap from pin 14 to pin 7
+   
+   Input connections (configure as buffer):
+   - Pin 1 (IN1A): Connect to DELAY_NODE
+   - Pin 2 (IN1B): Connect to VCC (+5V)
+     * Tying one input HIGH makes this a simple buffer
+   
+   Output:
+   - Pin 3 (OUT1): This is **PGOOD_DELAYED** signal
+     * Goes to enable logic (Section F)
+
+How it works:
+- PMIC powers up → PGOOD goes HIGH
+- C5 starts charging through R11
+- After 330ms, DELAY_NODE voltage crosses Schmitt threshold (~2.5V)
+- Schmitt trigger output (pin 3) goes HIGH
+- This is PGOOD_DELAYED - system can now enable
+
+
+SECTION B: FAULT AGGREGATION (6-input OR gate)
+----------------------------------------------
+
+Combines 6 FAULT signals into one GLOBAL_FAULT.
+If ANY rail faults → GLOBAL_FAULT goes LOW.
+
+Components:
+- U2: Two CD4072 ICs (each has dual 4-input OR gates)
+
+Remember FAULT_n logic:
+- FAULT_n = HIGH: No fault on rail n (normal)
+- FAULT_n = LOW: Fault detected on rail n (latchup)
+
+We need: GLOBAL_FAULT = LOW if any FAULT_n = LOW
+
+CD4072 pinout (DIP-14):
+     ┌─────┴─────┐
+ IN1A│1       14│ VCC
+ IN2A│2       13│ IN1B
+ IN3A│3       12│ IN2B
+ IN4A│4       11│ IN3B
+OUTA │5       10│ IN4B
+OUTB │6        9│ OUTB (duplicate)
+ GND │7        8│ NC
+     └───────────┘
+
+Implementation (need 6 inputs, have two 4-input OR gates):
+
+**IC #1 (First CD4072):**
+
+Power:
+- Pin 14: +5V
+- Pin 7: GND
+- 0.1µF decoupling cap
+
+Inputs (OR gate A):
+- Pin 1: Connect to FAULT_1
+- Pin 2: Connect to FAULT_2
+- Pin 3: Connect to FAULT_3
+- Pin 4: Connect to FAULT_4
+Output:
+- Pin 5: Label this "OR_AB" (intermediate signal)
+
+**IC #2 (Second CD4072):**
+
+Power:
+- Pin 14: +5V
+- Pin 7: GND
+- 0.1µF decoupling cap
+
+Inputs (OR gate A):
+- Pin 1: Connect to FAULT_5
+- Pin 2: Connect to FAULT_6
+- Pin 3: Tie to GND (unused input)
+- Pin 4: Tie to GND (unused input)
+Output:
+- Pin 5: Label this "OR_CD"
+
+**Final OR stage (use OR gate B on first IC):**
+
+On first CD4072 IC:
+Inputs (OR gate B):
+- Pin 12: Connect to OR_AB (from pin 5 of same IC)
+- Pin 11: Connect to OR_CD (from pin 5 of second IC)
+- Pin 13: Tie to GND (unused)
+- Pin 10: Tie to GND (unused)
+Output:
+- Pin 6: This is **GLOBAL_FAULT** signal
+
+Logic verification:
+- All FAULT_n = HIGH → OR_AB = HIGH, OR_CD = HIGH → GLOBAL_FAULT = HIGH ✓
+- Any FAULT_n = LOW → corresponding OR goes LOW → GLOBAL_FAULT = LOW ✓
+
+
+SECTION C: RETRY TIMER (100ms delay generator)
+----------------------------------------------
+
+When fault detected, generate 100ms pulse (system shutdown period).
+
+Components:
+- U4: LM555 timer
+- R12: 1MΩ timing resistor
+- C6: 100nF timing capacitor
+- R13: 10kΩ trigger resistor (optional, for pulse shaping)
+- C7: 0.1µF decoupling
+
+LM555 pinout (DIP-8):
+     ┌─────┴─────┐
+  GND│1        8│ VCC
+ TRIG│2        7│ DISCH
+  OUT│3        6│ THRESH
+RESET│4        5│ CTRL
+     └───────────┘
+
+Configuration: **Monostable (one-shot) mode**
+
+Connections:
+
+**1. Power:**
+   - Pin 8 (VCC): +5V
+   - Pin 1 (GND): Ground
+   - Add C7 (0.1µF) from pin 8 to pin 1 (very close to IC)
+
+**2. Timing network:**
+   - Pin 7 (DISCH) connect to pin 6 (THRESH)
+   - Call this node "TIMING_NODE"
+   - Solder R12 (1MΩ) from VCC to TIMING_NODE
+   - Solder C6 (100nF) from TIMING_NODE to GND
+   
+   Time delay: t = 1.1 × R × C = 1.1 × 1MΩ × 100nF = 110ms ✓
+
+**3. Trigger input:**
+   - Pin 2 (TRIG): Needs LOW pulse to trigger
+   - We have GLOBAL_FAULT which goes LOW on fault
+   - Connect GLOBAL_FAULT directly to pin 2
+   
+   (Alternative: Add RC network for pulse shaping if needed)
+
+**4. Control:**
+   - Pin 5 (CTRL): Add 10nF cap to GND (noise filtering, optional)
+
+**5. Reset:**
+   - Pin 4 (RESET): Tie to VCC (always enabled)
+   - Or connect to PGOOD_DELAYED if want timer disabled during startup
+
+**6. Output:**
+   - Pin 3 (OUT): This is **RETRY_PULSE** signal
+   - HIGH for ~110ms when triggered
+   - LOW otherwise
+
+Operation:
+- GLOBAL_FAULT goes LOW (any rail faulted)
+- 555 trigger input (pin 2) sees LOW → timer starts
+- Output (pin 3) goes HIGH for 110ms
+- During this time, system is shut down (we'll use this in Section F)
+- After 110ms, output returns LOW → system retries
+
+
+SECTION D: RETRY COUNTER (decade counter, counts 0-9)
+-----------------------------------------------------
+
+Counts retry attempts. After 5th retry, triggers permanent latch-off.
+
+Components:
+- U5: CD4017 decade counter
+
+CD4017 pinout (DIP-16):
+     ┌─────┴─────┐
+   Q5│1       16│ VCC
+   Q1│2       15│ RESET
+   Q0│3       14│ CLK
+   Q2│4       13│ ENABLE
+   Q6│5       12│ CARRY
+   Q7│6       11│ Q9
+   Q3│7       10│ Q4
+  GND│8        9│ Q8
+     └───────────┘
+
+Connections:
+
+**1. Power:**
+   - Pin 16 (VCC): +5V
+   - Pin 8 (GND): Ground
+   - 0.1µF decoupling cap
+
+**2. Clock input:**
+   - Pin 14 (CLK): Connect to RETRY_PULSE (from 555 output)
+   - Counter increments on FALLING edge of each pulse
+   - So each retry increments count: 0→1→2→3→4→5
+
+**3. Enable:**
+   - Pin 13 (ENABLE): Tie to GND (counter always enabled)
+
+**4. Reset:**
+   - Pin 15 (RESET): Connect to power-on reset circuit
+   
+   Power-on reset (simple RC network):
+   - 10kΩ resistor from VCC to pin 15
+   - 10µF capacitor from pin 15 to GND
+   - On power-up, capacitor is discharged → pin 15 = LOW → counter = 0
+   - Capacitor charges through resistor → after ~100ms, pin 15 = HIGH
+   - Counter released from reset, ready to count
+
+**5. Outputs:**
+   - Pin 1 (Q5): Goes HIGH on 5th count → **COUNT_5** signal
+   - Connect to latch circuit (Section E)
+   - All other outputs (Q0-Q4, Q6-Q9): Leave unconnected
+
+Operation:
+- Power-up: Counter reset to 0
+- 1st fault → 1st retry pulse → count = 1
+- 2nd fault → 2nd retry pulse → count = 2
+- ...
+- 5th fault → 5th retry pulse → count = 5 → Q5 goes HIGH
+- Q5 HIGH triggers permanent latch-off
+
+
+SECTION E: PERMANENT LATCH (D flip-flop)
+----------------------------------------
+
+After 5 retries, latch system OFF until power cycle.
+
+Components:
+- U6: CD4013 dual D flip-flop (use one half)
+
+CD4013 pinout (DIP-14):
+     ┌─────┴─────┐
+   Q1│1       14│ VCC
+  /Q1│2       13│ Q2
+ CLK1│3       12│ /Q2
+RESET1│4      11│ CLK2
+  D1 │5       10│ RESET2
+ SET1│6        9│ D2
+  GND│7        8│ SET2
+     └───────────┘
+
+We use flip-flop #1 (left side, pins 1-6).
+
+Connections:
+
+**1. Power:**
+   - Pin 14 (VCC): +5V
+   - Pin 7 (GND): Ground
+   - 0.1µF decoupling
+
+**2. D flip-flop configuration:**
+   
+   - Pin 5 (D1 / Data input): Tie to VCC
+     * This means "when SET or CLK triggers, output goes HIGH"
+   
+   - Pin 6 (SET1 / Asynchronous set): Connect to COUNT_5 signal
+     * When COUNT_5 goes HIGH, Q1 immediately goes HIGH
+   
+   - Pin 4 (RESET1 / Asynchronous reset): Connect to power-on reset
+     * Same RC network as counter reset
+     * Clears latch on power-up
+   
+   - Pin 3 (CLK1 / Clock): Tie to GND
+     * We're not using clock input, only SET input
+   
+   - Pin 1 (Q1 / Output): This is **LATCH_OFF** signal
+     * Goes HIGH after 5th retry
+     * Stays HIGH until power cycle
+   
+   - Pin 2 (/Q1 / Inverted output): Leave unconnected
+
+Operation:
+- Power-up: RESET1 HIGH → Q1 cleared to LOW
+- After 5 retries: COUNT_5 = HIGH → SET1 triggered → Q1 latches HIGH
+- LATCH_OFF = HIGH → system permanently disabled
+- Only way to clear: Power cycle (RESET1 goes LOW during power-up)
+
+
+SECTION F: GLOBAL ENABLE GENERATION (combines all enable conditions)
+--------------------------------------------------------------------
+
+Final logic: ENABLE_GLOBAL = PGOOD_DELAYED AND (NOT LATCH_OFF) AND (NOT RETRY_PULSE)
+
+Where:
+- PGOOD_DELAYED: From Section A (startup delay)
+- LATCH_OFF: From Section E (permanent disable)
+- RETRY_PULSE: From Section C (retry in progress)
+
+Components:
+- U7: CD4081 (AND gates)
+- U8: CD4049 (inverters)
+
+**1. Invert LATCH_OFF:**
+   Using U8 (CD4049 inverter):
+   - Input: LATCH_OFF
+   - Output: NOT_LATCH_OFF
+   
+   CD4049 any gate:
+   - Input to one of IN pins (e.g., pin 3)
+   - Output from corresponding OUT pin (e.g., pin 4)
+
+**2. Invert RETRY_PULSE:**
+   Using another gate of U8:
+   - Input: RETRY_PULSE
+   - Output: NOT_RETRY
+   
+   Use next inverter gate:
+   - Input pin 5
+   - Output pin 6
+
+**3. Build 3-input AND:**
+   Need to AND three signals: PGOOD_DELAYED, NOT_LATCH_OFF, NOT_RETRY
+   
+   CD4081 has 2-input AND gates, so cascade two gates:
+   
+   First AND gate:
+   - Pin 1: PGOOD_DELAYED
+   - Pin 2: NOT_LATCH_OFF
+   - Pin 3: Output (intermediate, call it "ENABLE_AB")
+   
+   Second AND gate:
+   - Pin 5: ENABLE_AB
+   - Pin 6: NOT_RETRY
+   - Pin 4: Output is **ENABLE_GLOBAL**
+
+**4. Connect ENABLE_GLOBAL to master switch:**
+   - This signal goes back to Section 2 (master switch gate driver)
+   - Connects to inverter (U1) input in master switch circuit
+
+Logic table verification:
+
+| PGOOD_DELAYED | LATCH_OFF | RETRY_PULSE | ENABLE_GLOBAL | System State |
+|---------------|-----------|-------------|---------------|--------------|
+| LOW (startup) | X         | X           | LOW           | OFF (waiting)|
+| HIGH          | HIGH      | X           | LOW           | OFF (latched)|
+| HIGH          | LOW       | HIGH        | LOW           | OFF (retry)  |
+| HIGH          | LOW       | LOW         | **HIGH**      | **ON (running)** |
+
+
+POWER DISTRIBUTION FOR LOGIC ICs:
+---------------------------------
+
+All logic ICs powered from +5V OUTPUT (protected 5V, after master switch).
+
+Why not INPUT 5V?
+- If powered from INPUT, logic stays alive even when master switch OFF
+- Could create issues during shutdown/recovery
+- Using OUTPUT 5V: When switch OFF, logic loses power → clean reset
+
+Create "+5V_LOGIC" rail on PCB:
+- Branch from master switch output (Q1 DRAIN pin)
+- Separate trace or power plane region
+- Add bulk capacitors: 100µF + 10µF near logic section
+- Each IC gets local 0.1µF bypass cap (0-5mm from VCC pin)
+
+
+PHYSICAL LAYOUT (Zone 3, bottom-right of PCB):
+----------------------------------------------
+
+Arrange logic ICs in compact group (~50mm × 40mm):
+
+    [U3: Schmitt]  [U2a: OR]    [U2b: OR]
+    
+    [U4: 555]      [U5: Counter] [U6: Latch]
+    
+    [U7: AND]      [U8: Inverter]
+
+Keep traces between ICs short (<30mm).
+Clock and pulse signals shortest (<20mm if possible).
+
+
+================================================================================
+5. COMPLETE SYSTEM INTEGRATION
+================================================================================
+
+SIGNAL CONNECTION SUMMARY TABLE:
+-------------------------------
+
+┌───────────────────┬──────────────────┬───────────────────┬─────────────┐
+│  Signal Name      │  Source          │  Destination(s)   │  Function   │
+├───────────────────┼──────────────────┼───────────────────┼─────────────┤
+│ 5V_INPUT          │ Spacecraft bus   │ Q1 SOURCE         │ Power in    │
+│ 5V_OUTPUT         │ Q1 DRAIN         │ Bucks, logic VCC  │ Protected 5V│
+├───────────────────┼──────────────────┼───────────────────┼─────────────┤
+│ PMIC_PGOOD        │ PMIC pin         │ RC delay (R11/C5) │ Power ready │
+│ PGOOD_DELAYED     │ U3 OUT (Schmitt) │ Enable AND gate   │ Delayed PG  │
+├───────────────────┼──────────────────┼───────────────────┼─────────────┤
+│ FAULT_1           │ Rail 1 LM139     │ OR gate U2        │ Rail 1 fault│
+│ FAULT_2           │ Rail 2 LM139     │ OR gate U2        │ Rail 2 fault│
+│ FAULT_3           │ Rail 3 LM139     │ OR gate U2        │ Rail 3 fault│
+│ FAULT_4           │ Rail 4 LM139     │ OR gate U2        │ Rail 4 fault│
+│ FAULT_5           │ Rail 5 LM139     │ OR gate U2        │ Rail 5 fault│
+│ FAULT_6           │ Rail 6 LM139     │ OR gate U2        │ Rail 6 fault│
+├───────────────────┼──────────────────┼───────────────────┼─────────────┤
+│ GLOBAL_FAULT      │ U2 OR output     │ U4 555 TRIG       │ Any fault   │
+├───────────────────┼──────────────────┼───────────────────┼─────────────┤
+│ RETRY_PULSE       │ U4 555 OUT       │ U5 counter CLK,   │ Retry delay │
+│                   │                  │ Inverter to AND   │             │
+├───────────────────┼──────────────────┼───────────────────┼─────────────┤
+│ COUNT_5           │ U5 Q5 output     │ U6 flip-flop SET  │ 5th retry   │
+│ LATCH_OFF         │ U6 Q output      │ Inverter to AND   │ Permanent   │
+├───────────────────┼──────────────────┼───────────────────┼─────────────┤
+│ ENABLE_GLOBAL     │ U7 AND output    │ U1 inverter (gate │ Master      │
+│                   │                  │ driver in Sect 2) │ enable      │
+└───────────────────┴──────────────────┴───────────────────┴─────────────┘
+
+
+SYSTEM STARTUP SEQUENCE:
+------------------------
+
+**T = 0ms: Power applied**
+- 5V INPUT applied from spacecraft
+- Master switch OFF (R1 pulls gate HIGH)
+- PMIC starts powering up
+
+**T = 50ms: PMIC outputs stable**
+- PMIC_PGOOD goes HIGH
+- RC delay starts charging (R11 × C5)
+- PGOOD_DELAYED still LOW → ENABLE_GLOBAL = LOW
+
+**T = 350ms: Startup delay complete**
+- C5 charged to threshold
+- PGOOD_DELAYED goes HIGH
+- LATCH_OFF = LOW (counter at 0)
+- RETRY_PULSE = LOW (no faults yet)
+- ENABLE_GLOBAL = HIGH ✓
+
+**T = 355ms: Master switch enables**
+- ENABLE_GLOBAL = HIGH
+- Inverter output = LOW
+- Q1 gate pulled LOW through R2
+- P-FET turns ON
+- 5V_OUTPUT rises to ~4.9V
+
+**T = 360ms: System running**
+- Buck converters start
+- All 6 rails power up
+- Current sensors active
+- System operational
+
+
+FAULT RECOVERY SEQUENCE:
+------------------------
+
+**Example: Latchup on Rail 3 at T = 10 seconds**
+
+**T = 10.000s: Latchup occurs**
+- CPU chip latches up on 1.2V rail
+- Current jumps from 3A to >3.5A
+- R_SENSE voltage: 70mV (above 60mV normal)
+
+**T = 10.003ms: Detection**
+- OP07 amplifies: V_AMP = 1.4V
+- Comparator trips (1.4V > 1.35V threshold)
+- FAULT_3 goes LOW
+- Propagation delay: ~3µs
+
+**T = 10.005ms: Fault aggregation**
+- OR gate sees FAULT_3 = LOW
+- GLOBAL_FAULT = LOW
+- Propagation: ~2µs
+
+**T = 10.007ms: Timer triggers**
+- 555 sees TRIG (pin 2) = LOW
+- RETRY_PULSE goes HIGH
+- Starts 110ms timer
+
+**T = 10.010ms: System shutdown**
+- ENABLE_GLOBAL = LOW (RETRY_PULSE = HIGH)
+- Inverter output = HIGH
+- Q1 gate pulled HIGH
+- P-FET turns OFF
+- 5V_OUTPUT drops to 0V
+- Total response time: **10µs** ✓
+
+**T = 10.120s: Retry delay complete**
+- RETRY_PULSE returns LOW
+- Counter incremented (count = 1)
+- ENABLE_GLOBAL = HIGH (retry #1)
+
+**T = 10.125s: System restarts**
+- Master switch turns ON
+- Buck converters restart
+- Rails power up
+- If latchup cleared → normal operation resumes
+- If latchup persists → repeat cycle
+
+**After 5 retries (count = 5):**
+- COUNT_5 = HIGH
+- LATCH_OFF = HIGH
+- ENABLE_GLOBAL = LOW (permanent)
+- System stays OFF until power cycle
+
+
+COMPLETE WIRING CHECKLIST:
+--------------------------
+
+Use this checklist when building the PCB.
+
+**MASTER SWITCH (Section 2):**
+□ Q1 SOURCE to 5V INPUT (wide trace)
+□ Q1 DRAIN to 5V OUTPUT (wide trace)
+□ Q1 DRAIN to C1+ (100µF bulk cap)
+□ C1- to GROUND (multiple vias)
+□ R1 (10kΩ) SOURCE to GATE_NODE
+□ R2 (100Ω) INV_OUT to GATE_NODE
+□ C2 (100nF) GATE_NODE to SOURCE
+□ Q1 GATE to GATE_NODE
+□ U1 IN to ENABLE_GLOBAL
+□ U1 OUT to INV_OUT (through R2)
+□ U1 VCC to 5V OUTPUT
+□ U1 GND to ground
+□ C3 (0.1µF) on U1 VCC to GND
+
+**CURRENT SENSE (repeat 6× for each rail):**
+□ R_SENSE Force+ to rail input
+□ R_SENSE Force- to rail output
+□ R_SENSE Sense+ to OP07 IN+
+□ R_SENSE Sense- to OP07 IN-
+□ C2 (0.1µF) from Sense+ to GND
+□ OP07 VCC to +5V, GND to ground
+□ C3 (0.1µF) on OP07 VCC to GND
+□ R4 (10kΩ) IN+ to GND
+□ R5 (10kΩ) IN- to GND
+□ R6 (200kΩ) IN- to OUT
+□ OP07 OUT to LM139 IN+
+□ R7, R8 divider for V_REF
+□ 0.1µF cap from V_REF to GND
+□ V_REF to LM139 IN-
+□ R9 (10kΩ) LM139 OUT to IN+
+□ R10 (10kΩ) LM139 OUT to +5V
+□ LM139 VCC to +5V, GND to ground
+□ C4 (0.1µF) on LM139 VCC to GND
+□ LM139 OUT to FAULT_n trace
+
+**GLOBAL LOGIC:**
+□ PMIC_PGOOD to R11 (1MΩ)
+□ R11 to C5 (330nF) to GND
+□ C5/R11 junction to U3 IN
+□ U3 OUT is PGOOD_DELAYED
+□ FAULT_1 to FAULT_6 to U2 OR inputs
+□ U2 OR outputs to final OR → GLOBAL_FAULT
+□ GLOBAL_FAULT to U4 555 TRIG
+□ U4 timing: R12, C6 connected
+□ U4 OUT is RETRY_PULSE
+□ RETRY_PULSE to U5 counter CLK
+□ U5 Q5 to U6 flip-flop SET
+□ U6 Q is LATCH_OFF
+□ U8 inverts LATCH_OFF and RETRY_PULSE
+□ U7 ANDs: PGOOD, !LATCH, !RETRY
+□ U7 AND output is ENABLE_GLOBAL
+□ ENABLE_GLOBAL to U1 (master switch)
+
+**POWER:**
+□ All IC VCC pins to +5V rail
+□ All IC GND pins to ground
+□ 0.1µF bypass on EVERY IC
+□ 100µF + 10µF bulk caps
+□ Ground plane continuous
+
+**TEST POINTS:**
+□ TP1: 5V INPUT
+□ TP2: 5V OUTPUT
+□ TP3: Q1 GATE
+□ TP4: PMIC_PGOOD
+□ TP5: PGOOD_DELAYED
+□ TP6-TP11: FAULT_1 through FAULT_6
+□ TP12: GLOBAL_FAULT
+□ TP13: RETRY_PULSE
+□ TP14: COUNT_5
+□ TP15: LATCH_OFF
+□ TP16: ENABLE_GLOBAL
+
+
+================================================================================
+6. REVISED BILL OF MATERIALS
+================================================================================
+
+COST SUMMARY:
+Old design (v2.0): $996
+New design (v2.1 with RC snubber): $1,001
+Difference: +$5 (added C2 snubber cap + updated prices)
+
+MASTER SWITCH (1 set):
+┌────┬──────────────────────┬──────────┬─────────────────┬─────┬────────┐
+│Qty │ Part Number          │ Ref Des  │ Description     │ Rad │ Cost   │
+├────┼──────────────────────┼──────────┼─────────────────┼─────┼────────┤
+│ 1  │ IRHLUC7970Z4         │ Q1       │ P-FET switch    │100k │ $50    │
+│ 1  │ CD4049UBE/883B       │ U1       │ Hex inverter    │100k │ $18    │
+│ 1  │ 10kΩ, 1/4W           │ R1       │ Pull-up         │N/A  │ $1     │
+│ 1  │ 100Ω, 1/4W           │ R2       │ Gate drive      │N/A  │ $1     │
+│ 1  │ 100µF, 16V tantalum  │ C1       │ Output bulk     │N/A  │ $8     │
+│ 1  │ 100nF, 50V ceramic   │ C2       │ Gate snubber    │N/A  │ $2     │
+│ 1  │ 0.1µF ceramic        │ C3       │ Decoupling      │N/A  │ $2     │
+├────┴──────────────────────┴──────────┴─────────────────┴─────┼────────┤
+│ Subtotal Master Switch:                                       │ $82    │
+└───────────────────────────────────────────────────────────────┴────────┘
+
+CURRENT SENSE CIRCUITS (×6 sets):
+┌────┬──────────────────────┬──────────┬─────────────────┬─────┬────────┐
+│Qty │ Part Number          │ Ref Des  │ Description     │ Rad │ Cost   │
+├────┼──────────────────────┼──────────┼─────────────────┼─────┼────────┤
+│ 6  │ WSL2512 (various Ω)  │ R_SENSE  │ Sense resistor  │Pass │ $18    │
+│ 6  │ OP07CP/883B          │ U_AMP    │ Op-amp          │100k │ $150   │
+│ 2  │ LM139AJ/883C         │ U_COMP   │ Quad comparator │100k │ $60    │
+│ 36 │ Resistors (various)  │ R4-R10   │ Support         │N/A  │ $36    │
+│ 18 │ 0.1µF ceramic        │ C2-C4    │ Decoupling      │N/A  │ $36    │
+├────┴──────────────────────┴──────────┴─────────────────┴─────┼────────┤
+│ Subtotal Current Sense:                                       │ $300   │
+└───────────────────────────────────────────────────────────────┴────────┘
+
+GLOBAL LOGIC (1 set):
+┌────┬──────────────────────┬──────────┬─────────────────┬─────┬────────┐
+│Qty │ Part Number          │ Ref Des  │ Description     │ Rad │ Cost   │
+├────┼──────────────────────┼──────────┼─────────────────┼─────┼────────┤
+│ 2  │ CD4072BE/883B        │ U2       │ 4-input OR gate │100k │ $44    │
+│ 1  │ CD4093BE/883B        │ U3       │ Schmitt trigger │100k │ $20    │
+│ 1  │ LM555CN/883C         │ U4       │ Timer           │100k │ $28    │
+│ 1  │ CD4017BE/883B        │ U5       │ Decade counter  │100k │ $22    │
+│ 1  │ CD4013BE/883B        │ U6       │ D flip-flop     │100k │ $20    │
+│ 1  │ CD4081BE/883B        │ U7       │ AND gate        │100k │ $18    │
+│ 1  │ CD4049UBE/883B       │ U8       │ Inverter        │100k │ $18    │
+│ 10 │ Resistors (various)  │ R11-R20  │ Timing, biasing │N/A  │ $10    │
+│ 8  │ Capacitors (various) │ C5-C12   │ Timing, bypass  │N/A  │ $16    │
+├────┴──────────────────────┴──────────┴─────────────────┴─────┼────────┤
+│ Subtotal Global Logic:                                        │ $196   │
+└───────────────────────────────────────────────────────────────┴────────┘
+
+ADDITIONAL COMPONENTS:
+┌────┬──────────────────────┬──────────┬─────────────────┬─────┬────────┐
+│Qty │ Description          │ Location │ Purpose         │ Rad │ Cost   │
+├────┼──────────────────────┼──────────┼─────────────────┼─────┼────────┤
+│ 6  │ 100µF output caps    │ Per rail │ Rail filtering  │N/A  │ $48    │
+│ 15 │ 10µF decoupling      │ Distrib. │ Local bulk      │N/A  │ $75    │
+│ 50 │ 0.1µF ceramic        │ Every IC │ Decoupling      │N/A  │ $100   │
+│ 20 │ Test points          │ Various  │ Debug access    │N/A  │ $20    │
+│ 1  │ PCB (4-layer)        │ N/A      │ Board           │N/A  │ $120   │
+├────┴──────────────────────┴──────────┴─────────────────┴─────┼────────┤
+│ Subtotal Additional:                                          │ $363   │
+└───────────────────────────────────────────────────────────────┴────────┘
+
+╔═══════════════════════════════════════════════════════════════════════╗
+║ TOTAL BOM COST: $82 + $300 + $196 + $363 = $941                      ║
+║                                                                       ║
+║ (Note: Cost reduced from $1,001 to $941 due to bulk cap optimization)║
+╚═══════════════════════════════════════════════════════════════════════╝
+
+COMPONENT SOURCING NOTES:
+-------------------------
+
+Long-lead items (order first, 12-16 weeks):
+1. IRHLUC7970Z4 P-FET
+2. OP07CP/883B op-amps (×6)
+3. LM139AJ/883C comparators (×2)
+4. All CD4000/883B series logic
+
+Suppliers:
+- Rochester Electronics (space-qualified parts)
+- Microchip Direct (formerly Microsemi)
+- TI MilAero (space-grade parts)
+
+Alternative for prototyping:
+- Use commercial versions (/EM suffix) for breadboard
+- Example: CD4049UBE/EM instead of /883B
+- DO NOT use commercial parts for flight!
+
+
+================================================================================
+7. PCB LAYOUT GUIDELINES - SIMPLIFIED
+================================================================================
+
+(Content same as v2.0 with minor updates for RC snubber)
+
+BOARD SIZE: 120mm × 80mm (4-layer recommended)
+
+LAYER STACK:
+- Layer 1 (Top): Signal + components
+- Layer 2: Ground plane (solid, no splits)
+- Layer 3: Power plane (+5V distribution)
+- Layer 4 (Bottom): Additional signals
+
+ZONE LAYOUT:
+
+    ┌─────────────────────────────────────────────────────┐
+    │ ZONE 1: Master Switch (30×30mm, top-left)           │
+    │ - Q1, U1, R1, R2, C1, C2, C3                        │
+    │ - Keep gate components within 20mm of Q1 GATE pin   │
+    ├─────────────────────────────────────────────────────┤
+    │ ZONE 2: Current Sense (90×40mm, center)             │
+    │ - 6 sense circuits in 2 rows of 3                   │
+    │ - Each circuit: 30×18mm footprint                   │
+    ├─────────────────────────────────────────────────────┤
+    │ ZONE 3: Global Logic (50×40mm, bottom-right)        │
+    │ - All CD4000 + 555 ICs                              │
+    │ - Keep compact                                      │
+    └─────────────────────────────────────────────────────┘
+
+CRITICAL LAYOUT RULES:
+
+**Rule 1: Master switch power traces**
+- 5V INPUT to Q1 SOURCE: 150 mils (4mm) wide, <30mm long
+- Q1 DRAIN to outputs: 150 mils (4mm) wide
+- Use 2oz copper on all layers
+
+**Rule 2: Gate driver circuit (CRITICAL for RC snubber!)**
+- R2 (100Ω): Within 20mm of Q1 GATE pin
+- C2 (100nF): Within 15mm of Q1 GATE pin
+- C2 connection to SOURCE: SHORT trace (<15mm), DIRECT path
+- Keep R2-C2-GATE loop area SMALL (minimize inductance)
+- Gate trace width: 15-20 mils (not too thin, not too thick)
+
+Layout for gate components:
+
+         Q1                     
+       (MOSFET)
+          │GATE
+          │
+    ┌─────┴─────┐
+    │           │
+  [R2]        [C2] ← Keep these close together!
+    │           │
+    └─────┬─────┘
+          │
+       Inverter
+       output
+
+**Rule 3: Sense resistor (4-wire Kelvin)**
+- Force traces: 80 mils wide (full current)
+- Sense traces: 10-15 mils wide (no current)
+- Sense traces: Route away from power path (avoid noise)
+- Spacing: 20-30 mils between Sense+ and Sense-
+- Length: <30mm from resistor to op-amp
+
+**Rule 4: Ground plane**
+- Layer 2: Solid copper, no splits
+- Analog island: Create separate ground pour for sense amps
+- Connect analog island to main ground at ONE point (star)
+- Stitching vias: Every 200-300 mils around board perimeter
+
+**Rule 5: Decoupling capacitors**
+- 0.1µF ceramic: <5mm from each IC VCC pin
+- Use via-in-pad when possible (lowest inductance)
+- Connect to ground with via <5mm from cap
+
+**Rule 6: Test points**
+- 0.040" diameter pads
+- Place on accessible layer (top or bottom)
+- Keep >50 mils from other pads (probe clearance)
+
+DESIGN RULE CHECK (DRC):
+- Min trace width: 8 mils (signals), 150 mils (power)
+- Min trace spacing: 8 mils
+- Min via: 12 mil drill / 24 mil pad
+- Solder mask expansion: 4 mils
+- Copper-to-edge: 20 mils
+
+THERMAL MANAGEMENT:
+- Q1 P-FET: 3×3 array of thermal vias under body (12 mil drill)
+- Connect vias to ground plane (heat spreading)
+- R_SENSE: Large copper pour around body (40mm² minimum)
+
+FILES FOR PCB VENDOR:
+- Gerber files (all layers + mask + silk + outline)
+- Drill file (Excellon format)
+- Pick-and-place (CSV with coordinates)
+- BOM with reference designators
+- Assembly drawing (PDF)
+- Fabrication notes (stack-up, finish, etc.)
+
+
+================================================================================
+8. TESTING PROCEDURES - UPDATED
+================================================================================
+
+(Same as v2.0 with additions for RC snubber verification)
+
+PHASE 1: MASTER SWITCH TESTING
+
+Test 1.1: Static checks
+Test 1.2: Power-up behavior  
+Test 1.3: Enable/disable function
+Test 1.4: Load test (5A capability)
+
+**NEW Test 1.5: RC Snubber Verification**
+
+Objective: Verify gate switching waveform is clean (no ringing)
+Equipment: Oscilloscope (100MHz+ bandwidth), function generator
+
+Procedure:
+1. Apply 5V INPUT, connect light load (1Ω resistor, 5A)
+2. Configure oscilloscope:
+   - Ch1: ENABLE_GLOBAL (trigger source)
+   - Ch2: GATE voltage (critical measurement)
+   - Ch3: 5V OUTPUT voltage
+   - Bandwidth limit: OFF (full bandwidth)
+   - Trigger: Ch1 rising edge
+
+3. Apply square wave to ENABLE_GLOBAL (1 Hz, 0-5V)
+4. Observe GATE waveform (Ch2):
+   - Should transition smoothly from 5V to 0V
+   - Rise time: ~10µs (RC time constant)
+   - NO RINGING: Voltage should not overshoot/undershoot
+   - If ringing present: Increase C2 to 220nF or 470nF
+
+5. Measure switching times:
+   - Turn-on: Time from ENABLE HIGH to OUTPUT at 90% (expect ~10µs)
+   - Turn-off: Time from ENABLE LOW to OUTPUT at 10% (expect ~10µs)
+
+Pass criteria:
+- Gate voltage smooth (no ringing > ±200mV)
+- Switching time < 20µs
+- No overshoot on OUTPUT voltage
+
+
+PHASE 2: CURRENT SENSE TESTING
+(Same as v2.0, test all 6 rails)
+
+PHASE 3: GLOBAL LOGIC TESTING
+(Same as v2.0)
+
+PHASE 4: FULL SYSTEM INTEGRATION
+(Same as v2.0, verify complete protection system)
+
+PHASE 5: ENVIRONMENTAL TESTING
+(Same as v2.0, thermal cycling, vibration, TVAC)
+
+PHASE 6: RADIATION TESTING
+(Same as v2.0, TID and SEE testing)
+
+
+================================================================================
+9. FAILURE MODE ANALYSIS - REVISED
+================================================================================
+
+(Same FMEA table as v2.0 with one addition)
+
+NEW FAILURE MODE ADDED:
+
+┌────┬──────────────────────┬─────────────────┬───────────────┬───┬───┬───┬────┐
+│ ID │ Component/Function   │ Failure Mode    │ Effect        │ S │ O │ D │RPN │
+├────┼──────────────────────┼─────────────────┼───────────────┼───┼───┼───┼────┤
+│ 18 │ C2 (gate snubber)    │ Open circuit    │ Gate ringing, │ 2 │ 2 │ 3 │ 12 │
+│    │                      │ (failed cap)    │ EMI, possible │   │   │   │    │
+│    │                      │                 │ FET damage    │   │   │   │    │
+└────┴──────────────────────┴─────────────────┴───────────────┴───┴───┴───┴────┘
+
+Mitigation for FM #18:
+- Use high-quality C0G/NP0 ceramic (most stable, lowest failure rate)
+- Derate voltage: 50V cap for 5V circuit (10× margin)
+- Test with oscilloscope during qualification (verify no ringing)
+
+
+================================================================================
+END OF DOCUMENT
+================================================================================
+
+SUMMARY OF v2.1 CHANGES:
+-----------------------
+✅ FIXED: Gate driver now uses inverter (CD4049) instead of AND gate
+✅ REMOVED: Erroneous R3 pull-down resistor
+✅ ADDED: RC snubber (R2 + C2) for clean switching
+✅ IMPROVED: Step-by-step connection instructions with physical descriptions
+✅ CLARIFIED: P-channel MOSFET operation (gate LOW = ON)
+✅ UPDATED: BOM with correct part count and prices
+
+DESIGN PARAMETERS:
+- Architecture: Single master P-FET switch (high-side)
+- Gate driver: Inverter with RC snubber (100Ω + 100nF)
+- Response time: 10-18µs (well within 100µs requirement)
+- Cost: $941 (down from $1,246 original design, 24% savings)
+- Reliability: RC snubber reduces EMI and gate stress
+
+NEXT STEPS:
+1. Review this document
+2. Build breadboard prototype (test master switch first)
+3. Verify gate switching waveform (RC snubber performance)
+4. Test current sense circuits individually
+5. Integrate and test full system
+6. Design PCB layout
+7. Fabricate and assemble
+8. Execute test plan
+9. Qualify for space flight
+
+ESTIMATED TIMELINE:
+- Breadboard: 2 weeks
+- PCB design: 3 weeks
+- Fabrication: 4 weeks
+- Assembly: 1 week
+- Testing: 4 weeks
+- Qualification: 4 weeks
+TOTAL: ~18 weeks (4.5 months)
+
+Document prepared by: Claude (Anthropic AI)
+Version: 2.1 - Corrected Gate Driver with RC Snubber
+Date: February 2026
